@@ -43,6 +43,8 @@ from library.custom_train_functions import (
 )
 from library.utils import setup_logging, add_logging_arguments
 
+from library import deepspeed_utils
+
 setup_logging()
 import logging
 
@@ -993,6 +995,7 @@ def setup_parser() -> argparse.ArgumentParser:
     train_util.add_training_arguments(parser, True)
     train_util.add_sd_saving_arguments(parser)
     train_util.add_optimizer_arguments(parser)
+    deepspeed_utils.add_deepspeed_arguments(parser)
     config_util.add_config_arguments(parser)
     custom_train_functions.add_custom_train_arguments(parser)
     add_sdxl_training_arguments(parser)
