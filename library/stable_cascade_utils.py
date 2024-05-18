@@ -603,7 +603,6 @@ def add_effnet_arguments(parser):
     parser.add_argument(
         "--effnet_checkpoint_path",
         type=str,
-        required=True,
         help="path to EfficientNet checkpoint / EfficientNetのチェックポイントのパス",
     )
     return parser
@@ -643,7 +642,6 @@ def add_stage_c_arguments(parser):
     parser.add_argument(
         "--stage_c_checkpoint_path",
         type=str,
-        required=True,
         help="path to Stage C checkpoint / Stage Cのチェックポイントのパス",
     )
     return parser
