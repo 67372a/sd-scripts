@@ -18,6 +18,7 @@ init_ipex()
 
 from accelerate.utils import set_seed
 from diffusers import DDPMScheduler
+from library import deepspeed_utils
 
 import library.train_util as train_util
 from library.train_util import (
@@ -40,10 +41,9 @@ from library.custom_train_functions import (
     scale_v_prediction_loss_like_noise_prediction,
     add_v_prediction_like_loss,
     apply_debiased_estimation,
+    apply_masked_loss,
 )
 from library.utils import setup_logging, add_logging_arguments
-
-from library import deepspeed_utils
 
 setup_logging()
 import logging
@@ -186,9 +186,9 @@ class NetworkTrainer:
     def train(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
-
         train_util.verify_training_args(args)
         train_util.prepare_dataset_args(args, True)
+        deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
 
         cache_latents = args.cache_latents
@@ -405,6 +405,10 @@ class NetworkTrainer:
         # 学習に必要なクラスを準備する
         accelerator.print("prepare optimizer, data loader etc.")
 
+        print(network)
+        print(args.text_encoder_lr)
+        print(args.unet_lr)
+        print(args.learning_rate)
         # 後方互換性を確保するよ
         try:
             trainable_params = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr, args.learning_rate)
@@ -414,11 +418,12 @@ class NetworkTrainer:
             )
             trainable_params = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr)
 
+        print(len(trainable_params))
         optimizer_name, optimizer_args, optimizer = train_util.get_optimizer(args, trainable_params)
 
         # dataloaderを準備する
-        # DataLoaderのプロセス数：0はメインプロセスになる
-        n_workers = min(args.max_data_loader_n_workers, os.cpu_count() - 1)  # cpu_count-1 ただし最大で指定された数まで
+        # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
+        n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
 
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
@@ -481,20 +486,36 @@ class NetworkTrainer:
                 t_enc.text_model.embeddings.to(dtype=(weight_dtype if te_weight_dtype != weight_dtype else te_weight_dtype))
 
         # acceleratorがなんかよろしくやってくれるらしい / accelerator will do something good
-        if train_unet:
-            stage_c = accelerator.prepare(stage_c)
-        else:
-            stage_c.to(accelerator.device, dtype=unet_weight_dtype)  # move to device because unet is not prepared by accelerator
-        if train_text_encoder:
-            if len(text_encoders) > 1:
-                text_encoder = text_encoders = [accelerator.prepare(t_enc) for t_enc in text_encoders]
+        if args.deepspeed:
+            ds_model = deepspeed_utils.prepare_deepspeed_model(
+                args,
+                unet=stage_c if train_unet else None,
+                text_encoder1=text_encoders[0] if train_text_encoder else None,
+                text_encoder2=text_encoders[1] if train_text_encoder and len(text_encoders) > 1 else None,
+                network=network,
+            )
+            ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                ds_model, optimizer, train_dataloader, lr_scheduler
+            )
+            training_model = ds_model
+        else:        
+            if train_unet:
+                stage_c = accelerator.prepare(stage_c)
             else:
-                text_encoder = accelerator.prepare(text_encoder)
-                text_encoders = [text_encoder]
-        else:
-            pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
+                stage_c.to(accelerator.device, dtype=unet_weight_dtype)  # move to device because unet is not prepared by accelerator
+            if train_text_encoder:
+                if len(text_encoders) > 1:
+                    text_encoder = text_encoders = [accelerator.prepare(t_enc) for t_enc in text_encoders]
+                else:
+                    text_encoder = accelerator.prepare(text_encoder)
+                    text_encoders = [text_encoder]
+            else:
+                pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
 
-        network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
+            network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                network, optimizer, train_dataloader, lr_scheduler
+                )
+            training_model = network
 
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required
@@ -524,6 +545,31 @@ class NetworkTrainer:
         # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
         if args.full_fp16:
             train_util.patch_accelerator_for_fp16_training(accelerator)
+
+        # before resuming make hook for saving/loading to save/load the network weights only
+        def save_model_hook(models, weights, output_dir):
+            # pop weights of other models than network to save only network weights
+            if accelerator.is_main_process:
+                remove_indices = []
+                for i, model in enumerate(models):
+                    if not isinstance(model, type(accelerator.unwrap_model(network))):
+                        remove_indices.append(i)
+                for i in reversed(remove_indices):
+                    weights.pop(i)
+                # print(f"save model hook: {len(weights)} weights will be saved")
+
+        def load_model_hook(models, input_dir):
+            # remove models except network
+            remove_indices = []
+            for i, model in enumerate(models):
+                if not isinstance(model, type(accelerator.unwrap_model(network))):
+                    remove_indices.append(i)
+            for i in reversed(remove_indices):
+                models.pop(i)
+            # print(f"load model hook: {len(models)} models will be loaded")
+
+        accelerator.register_save_state_pre_hook(save_model_hook)
+        accelerator.register_load_state_pre_hook(load_model_hook)
 
         # resumeする
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
@@ -598,6 +644,11 @@ class NetworkTrainer:
             "ss_scale_weight_norms": args.scale_weight_norms,
             "ss_ip_noise_gamma": args.ip_noise_gamma,
             "ss_debiased_estimation": bool(args.debiased_estimation_loss),
+            "ss_noise_offset_random_strength": args.noise_offset_random_strength,
+            "ss_ip_noise_gamma_random_strength": args.ip_noise_gamma_random_strength,
+            "ss_loss_type": args.loss_type,
+            "ss_huber_schedule": args.huber_schedule,
+            "ss_huber_c": args.huber_c,
         }
 
         if use_user_config:
@@ -633,6 +684,11 @@ class NetworkTrainer:
                         "random_crop": bool(subset.random_crop),
                         "shuffle_caption": bool(subset.shuffle_caption),
                         "keep_tokens": subset.keep_tokens,
+                        "keep_tokens_separator": subset.keep_tokens_separator,
+                        "secondary_separator": subset.secondary_separator,
+                        "enable_wildcard": bool(subset.enable_wildcard),
+                        "caption_prefix": subset.caption_prefix,
+                        "caption_suffix": subset.caption_suffix,
                     }
 
                     image_dir_or_metadata_file = None
@@ -824,7 +880,7 @@ class NetworkTrainer:
 
             for step, batch in enumerate(train_dataloader):
                 current_step.value = global_step
-                with accelerator.accumulate(network):
+                with accelerator.accumulate(training_model):
                     on_step_start(text_encoder, stage_c)
 
                     with torch.no_grad():
@@ -971,7 +1027,7 @@ class NetworkTrainer:
 
         accelerator.end_training()
 
-        if is_main_process and args.save_state:
+        if is_main_process and (args.save_state or args.save_state_on_train_end):
             train_util.save_state_on_train_end(args, accelerator)
 
         if is_main_process:
@@ -993,9 +1049,10 @@ def setup_parser() -> argparse.ArgumentParser:
     train_util.add_tokenizer_arguments(parser)
     train_util.add_dataset_arguments(parser, True, True, True)
     train_util.add_training_arguments(parser, True)
+    train_util.add_masked_loss_arguments(parser)
+    deepspeed_utils.add_deepspeed_arguments(parser)
     train_util.add_sd_saving_arguments(parser)
     train_util.add_optimizer_arguments(parser)
-    deepspeed_utils.add_deepspeed_arguments(parser)
     config_util.add_config_arguments(parser)
     custom_train_functions.add_custom_train_arguments(parser)
     add_sdxl_training_arguments(parser)
@@ -1003,6 +1060,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no_metadata", action="store_true", help="do not save metadata in output model / メタデータを出力先モデルに保存しない"
     )
+
     parser.add_argument("--unet_lr", type=float, default=None, help="learning rate for U-Net / U-Netの学習率")
     parser.add_argument("--text_encoder_lr", type=float, default=None, help="learning rate for Text Encoder / Text Encoderの学習率")
 
@@ -1088,6 +1146,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     trainer = NetworkTrainer()
