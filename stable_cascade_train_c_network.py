@@ -816,7 +816,7 @@ class NetworkTrainer:
             target=sc.EpsilonTarget(),
             noise_cond=sc.CosineTNoiseCond(),
             loss_weight=sc.AdaptiveLossWeight() if args.adaptive_loss_weight else sc.P2LossWeight(),
-            offset_noise=args.noise_offset if args.noise_offset and args.noise_offset_random_strength else 0
+            offset_noise=args.noise_offset if args.noise_offset else 0
         )
 
         if accelerator.is_main_process:
@@ -921,7 +921,7 @@ class NetworkTrainer:
                     # FORWARD PASS
                     with torch.no_grad():
                         noised, noise, target, logSNR, noise_cond, loss_weight = gdf.diffuse(
-                            latents, shift=1, loss_shift=1, offset=args.noise_offset if args.noise_offset and not args.noise_offset_random_strength else None
+                            latents, shift=1, loss_shift=1, offset=None
                             )
 
                     zero_img_emb = torch.zeros(noised.shape[0], 768, device=accelerator.device)
