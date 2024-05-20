@@ -17,7 +17,6 @@ from library.device_utils import init_ipex, clean_memory_on_device
 init_ipex()
 
 from accelerate.utils import set_seed
-from diffusers import DDPMScheduler
 from library import deepspeed_utils
 
 import library.train_util as train_util
@@ -405,10 +404,6 @@ class NetworkTrainer:
         # 学習に必要なクラスを準備する
         accelerator.print("prepare optimizer, data loader etc.")
 
-        print(network)
-        print(args.text_encoder_lr)
-        print(args.unet_lr)
-        print(args.learning_rate)
         # 後方互換性を確保するよ
         try:
             trainable_params = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr, args.learning_rate)
