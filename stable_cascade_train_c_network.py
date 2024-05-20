@@ -816,6 +816,7 @@ class NetworkTrainer:
             target=sc.EpsilonTarget(),
             noise_cond=sc.CosineTNoiseCond(),
             loss_weight=sc.AdaptiveLossWeight() if args.adaptive_loss_weight else sc.P2LossWeight(),
+            offset_noise=args.noise_offset if args.noise_offset and args.noise_offset_random_strength else 0
         )
 
         if accelerator.is_main_process:
@@ -919,14 +920,19 @@ class NetworkTrainer:
 
                     # FORWARD PASS
                     with torch.no_grad():
-                        noised, noise, target, logSNR, noise_cond, loss_weight = gdf.diffuse(latents, shift=1, loss_shift=1)
+                        noised, noise, target, logSNR, noise_cond, loss_weight = gdf.diffuse(
+                            latents, shift=1, loss_shift=1, offset=args.noise_offset if args.noise_offset and not args.noise_offset_random_strength else None
+                            )
 
                     zero_img_emb = torch.zeros(noised.shape[0], 768, device=accelerator.device)
                     with accelerator.autocast():
-                        pred = stage_c(
+                        noise_pred = stage_c(
                             noised, noise_cond, clip_text=encoder_hidden_states, clip_text_pooled=pool, clip_img=zero_img_emb
                         )
-                        loss = torch.nn.functional.mse_loss(pred, target, reduction="none").mean(dim=[1, 2, 3])
+                        loss = train_util.conditional_loss(
+                            noise_pred.float(), target.float(), reduction="none", loss_type="l2", huber_c=0.1 #TODO: loss type
+                        )
+                        loss = loss.mean([1, 2, 3])
                         loss_adjusted = (loss * loss_weight).mean()
 
                     if args.adaptive_loss_weight:
