@@ -12,10 +12,11 @@ from tqdm import tqdm
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
 
+
 init_ipex()
 
 from accelerate.utils import set_seed
-from diffusers import DDPMScheduler
+from library import deepspeed_utils
 
 import library.train_util as train_util
 from library.sdxl_train_util import add_sdxl_training_arguments
@@ -23,8 +24,6 @@ import library.stable_cascade_utils as sc_utils
 import library.stable_cascade as sc
 
 from library.utils import setup_logging, add_logging_arguments
-
-from library import deepspeed_utils
 
 setup_logging()
 import logging
@@ -41,6 +40,7 @@ from library.config_util import (
 def train(args):
     train_util.verify_training_args(args)
     train_util.prepare_dataset_args(args, True)
+    deepspeed_utils.prepare_deepspeed_args(args)
     setup_logging(args, reset=True)
 
     # assert (
@@ -289,13 +289,29 @@ def train(args):
         stage_c.to(weight_dtype)
         text_encoder1.to(weight_dtype)
 
-    # acceleratorがなんかよろしくやってくれるらしい
-    if train_stage_c:
-        stage_c = accelerator.prepare(stage_c)
-    if train_text_encoder1:
-        text_encoder1 = accelerator.prepare(text_encoder1)
 
-    optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
+        
+    if args.deepspeed:
+        ds_model = deepspeed_utils.prepare_deepspeed_model(
+            args,
+            unet=stage_c if train_stage_c else None,
+            text_encoder1=text_encoder1 if train_text_encoder1 else None,
+        )
+        # most of ZeRO stage uses optimizer partitioning, so we have to prepare optimizer and ds_model at the same time. # pull/1139#issuecomment-1986790007
+        ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            ds_model, optimizer, train_dataloader, lr_scheduler
+        )
+        training_models = [ds_model]
+
+    else:
+        # acceleratorがなんかよろしくやってくれるらしい
+        if train_stage_c:
+            stage_c = accelerator.prepare(stage_c)
+        if train_text_encoder1:
+            text_encoder1 = accelerator.prepare(text_encoder1)
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            optimizer, train_dataloader, lr_scheduler
+            )
 
     # TextEncoderの出力をキャッシュするときにはCPUへ移動する
     if args.cache_text_encoder_outputs:
@@ -533,12 +549,13 @@ def setup_parser() -> argparse.ArgumentParser:
     sc_utils.add_text_model_arguments(parser)
     sc_utils.add_previewer_arguments(parser)
     sc_utils.add_training_arguments(parser)
+    train_util.add_masked_loss_arguments(parser)
+    deepspeed_utils.add_deepspeed_arguments(parser)
     train_util.add_tokenizer_arguments(parser)
     train_util.add_dataset_arguments(parser, True, True, True)
     train_util.add_training_arguments(parser, False)
     train_util.add_sd_saving_arguments(parser)
     train_util.add_optimizer_arguments(parser)
-    deepspeed_utils.add_deepspeed_arguments(parser)
     config_util.add_config_arguments(parser)
     add_sdxl_training_arguments(parser)  # cache text encoder outputs
 
@@ -554,7 +571,6 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not use fp16/bf16 Effnet in mixed precision (use float Effnet) / mixed precisionでも fp16/bf16 Effnetを使わずfloat Effnetを使う",
     )
-
     return parser
 
 
@@ -562,6 +578,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     train(args)
