@@ -96,11 +96,14 @@ def load_tokenizer(args: argparse.Namespace):
     return tokenizers[0]
 
 
-def load_stage_c_model(stage_c_checkpoint_path, dtype=None, device="cpu") -> sc.StageC:
+def load_stage_c_model(stage_c_checkpoint_path, dtype=None, device="cpu", lite=False) -> sc.StageC:
     # Generator
     logger.info(f"Instantiating Stage C generator")
     with init_empty_weights():
-        generator_c = sc.StageC()
+        if lite:
+            generator_c = sc.StageC(c_cond=1536, c_hidden=[1536, 1536], nhead=[24, 24], blocks=[[4, 12], [12, 4]])
+        else:
+            generator_c = sc.StageC()
     logger.info(f"Loading Stage C generator from {stage_c_checkpoint_path}")
     stage_c_checkpoint = load_file(stage_c_checkpoint_path)
 
@@ -110,7 +113,6 @@ def load_stage_c_model(stage_c_checkpoint_path, dtype=None, device="cpu") -> sc.
     info = _load_state_dict_on_device(generator_c, stage_c_checkpoint, device, dtype=dtype)
     logger.info(info)
     return generator_c
-
 
 def load_stage_b_model(stage_b_checkpoint_path, dtype=None, device="cpu") -> sc.StageB:
     logger.info(f"Instantiating Stage B generator")
@@ -644,6 +646,11 @@ def add_stage_c_arguments(parser):
         type=str,
         help="path to Stage C checkpoint / Stage Cのチェックポイントのパス",
     )
+    parser.add_argument(
+        "--stage_c_lite",
+        action="store_true",
+        help="Specify if training with lite / 1B stage c",
+    )
     return parser
 
 
@@ -664,3 +671,4 @@ def add_training_arguments(parser):
         help="if specified, use adaptive loss weight. if not, use P2 loss weight"
         + " / Adaptive Loss Weightを使用する。指定しない場合はP2 Loss Weightを使用する",
     )
+    return parser

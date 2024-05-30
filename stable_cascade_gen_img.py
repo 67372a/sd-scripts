@@ -38,7 +38,7 @@ def main(args):
     effnet = sc_utils.load_effnet(args.effnet_checkpoint_path, loading_device)
     effnet.eval().requires_grad_(False).to(loading_device)
 
-    generator_c = sc_utils.load_stage_c_model(args.stage_c_checkpoint_path, dtype=dtype, device=loading_device)
+    generator_c = sc_utils.load_stage_c_model(args.stage_c_checkpoint_path, dtype=dtype, device=loading_device, lite=args.stage_c_lite)
     generator_c.eval().requires_grad_(False).to(loading_device)
     # if args.xformers or args.sdpa:
     print(f"Stage C: use_xformers_or_sdpa: {args.xformers} {args.sdpa}")

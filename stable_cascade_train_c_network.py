@@ -282,7 +282,7 @@ class NetworkTrainer:
         # model_version, text_encoder, vae, unet = self.load_target_model(args, weight_dtype, accelerator)
         loading_device = accelerator.device if args.lowram else "cpu"
         effnet = sc_utils.load_effnet(args.effnet_checkpoint_path, loading_device)
-        stage_c = sc_utils.load_stage_c_model(args.stage_c_checkpoint_path, dtype=weight_dtype, device=loading_device)
+        stage_c = sc_utils.load_stage_c_model(args.stage_c_checkpoint_path, dtype=weight_dtype, device=loading_device, lite=args.stage_c_lite)
         text_encoder = sc_utils.load_clip_text_model(args.text_model_checkpoint_path, dtype=weight_dtype, device=loading_device)
         model_version = sc.MODEL_VERSION_STABLE_CASCADE
 
