@@ -481,6 +481,7 @@ class NetworkTrainer:
                 t_enc.text_model.embeddings.to(dtype=(weight_dtype if te_weight_dtype != weight_dtype else te_weight_dtype))
 
         # acceleratorがなんかよろしくやってくれるらしい / accelerator will do something good
+        use_schedule_free_optimizer = args.optimizer_type.lower().endswith("schedulefree")
         if args.deepspeed:
             ds_model = deepspeed_utils.prepare_deepspeed_model(
                 args,
@@ -489,9 +490,9 @@ class NetworkTrainer:
                 text_encoder2=text_encoders[1] if train_text_encoder and len(text_encoders) > 1 else None,
                 network=network,
             )
-            ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                ds_model, optimizer, train_dataloader, lr_scheduler
-            )
+            ds_model, optimizer, train_dataloader = accelerator.prepare(ds_model, optimizer, train_dataloader)
+            if not use_schedule_free_optimizer:
+                lr_scheduler = accelerator.prepare(lr_scheduler)
             training_model = ds_model
         else:        
             if train_unet:
@@ -507,10 +508,18 @@ class NetworkTrainer:
             else:
                 pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
 
-            network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                network, optimizer, train_dataloader, lr_scheduler
-                )
+            network, optimizer, train_dataloader = accelerator.prepare(network, optimizer, train_dataloader)
+            if not use_schedule_free_optimizer:
+                lr_scheduler = accelerator.prepare(lr_scheduler)
             training_model = network
+
+        # make lambda function for calling optimizer.train() and optimizer.eval() if schedule-free optimizer is used
+        if use_schedule_free_optimizer:
+            optimizer_train_if_needed = lambda: (optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer).train()
+            optimizer_eval_if_needed = lambda: (optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer).eval()
+        else:
+            optimizer_train_if_needed = lambda: None
+            optimizer_eval_if_needed = lambda: None
 
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required
@@ -875,6 +884,7 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(text_encoder, stage_c)
 
             for step, batch in enumerate(train_dataloader):
+                optimizer_train_if_needed()
                 current_step.value = global_step
                 with accelerator.accumulate(training_model):
                     on_step_start(text_encoder, stage_c)
@@ -956,6 +966,8 @@ class NetworkTrainer:
                     max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
                 else:
                     keys_scaled, mean_norm, maximum_norm = None, None, None
+
+                optimizer_eval_if_needed()
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:

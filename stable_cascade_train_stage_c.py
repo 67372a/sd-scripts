@@ -289,7 +289,8 @@ def train(args):
         stage_c.to(weight_dtype)
         text_encoder1.to(weight_dtype)
 
-
+    # acceleratorがなんかよろしくやってくれるらしい
+    use_schedule_free_optimizer = args.optimizer_type.lower().endswith("schedulefree")
         
     if args.deepspeed:
         ds_model = deepspeed_utils.prepare_deepspeed_model(
@@ -298,9 +299,11 @@ def train(args):
             text_encoder1=text_encoder1 if train_text_encoder1 else None,
         )
         # most of ZeRO stage uses optimizer partitioning, so we have to prepare optimizer and ds_model at the same time. # pull/1139#issuecomment-1986790007
-        ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            ds_model, optimizer, train_dataloader, lr_scheduler
+        ds_model, optimizer, train_dataloader = accelerator.prepare(
+            ds_model, optimizer, train_dataloader
         )
+        if not use_schedule_free_optimizer:
+            lr_scheduler = accelerator.prepare(lr_scheduler)
         training_models = [ds_model]
 
     else:
@@ -309,9 +312,19 @@ def train(args):
             stage_c = accelerator.prepare(stage_c)
         if train_text_encoder1:
             text_encoder1 = accelerator.prepare(text_encoder1)
-        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            optimizer, train_dataloader, lr_scheduler
+        optimizer, train_dataloader = accelerator.prepare(
+            optimizer, train_dataloader
             )
+        if not use_schedule_free_optimizer:
+            lr_scheduler = accelerator.prepare(lr_scheduler)
+        
+    # make lambda function for calling optimizer.train() and optimizer.eval() if schedule-free optimizer is used
+    if use_schedule_free_optimizer:
+        optimizer_train_if_needed = lambda: optimizer.train()
+        optimizer_eval_if_needed = lambda: optimizer.eval()
+    else:
+        optimizer_train_if_needed = lambda: None
+        optimizer_eval_if_needed = lambda: None
 
     # TextEncoderの出力をキャッシュするときにはCPUへ移動する
     if args.cache_text_encoder_outputs:
@@ -386,6 +399,7 @@ def train(args):
             m.train()
 
         for step, batch in enumerate(train_dataloader):
+            optimizer_train_if_needed()
             current_step.value = global_step
             with accelerator.accumulate(*training_models):
                 if "latents" in batch and batch["latents"] is not None:
@@ -460,6 +474,8 @@ def train(args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            optimizer_eval_if_needed()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
