@@ -13,6 +13,7 @@ from tqdm import tqdm
 import torch
 from library import deepspeed_utils
 from library.device_utils import init_ipex, clean_memory_on_device
+
 init_ipex()
 
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -226,7 +227,7 @@ def train(args):
             )
         vae.to("cpu")
         clean_memory_on_device(accelerator.device)
-        
+
         accelerator.wait_for_everyone()
 
     if args.gradient_checkpointing:
@@ -276,9 +277,18 @@ def train(args):
         controlnet.to(weight_dtype)
 
     # acceleratorがなんかよろしくやってくれるらしい
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, train_dataloader, lr_scheduler
-    )
+    use_schedule_free_optimizer = args.optimizer_type.lower().endswith("schedulefree")
+    controlnet, optimizer, train_dataloader = accelerator.prepare(controlnet, optimizer, train_dataloader)
+    if not use_schedule_free_optimizer:
+        lr_scheduler = accelerator.prepare(lr_scheduler)
+
+    # make lambda function for calling optimizer.train() and optimizer.eval() if schedule-free optimizer is used
+    if use_schedule_free_optimizer:
+        optimizer_train_if_needed = lambda: optimizer.train()
+        optimizer_eval_if_needed = lambda: optimizer.eval()
+    else:
+        optimizer_train_if_needed = lambda: None
+        optimizer_eval_if_needed = lambda: None
 
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -393,6 +403,7 @@ def train(args):
         current_epoch.value = epoch + 1
 
         for step, batch in enumerate(train_dataloader):
+            optimizer_train_if_needed()
             current_step.value = global_step
             with accelerator.accumulate(controlnet):
                 with torch.no_grad():
@@ -420,7 +431,9 @@ def train(args):
                     )
 
                 # Sample a random timestep for each image
-                timesteps, huber_c = train_util.get_timesteps_and_huber_c(args, 0, noise_scheduler.config.num_train_timesteps, noise_scheduler, b_size, latents.device)
+                timesteps, huber_c = train_util.get_timesteps_and_huber_c(
+                    args, 0, noise_scheduler.config.num_train_timesteps, noise_scheduler, b_size, latents.device
+                )
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
@@ -452,7 +465,9 @@ def train(args):
                 else:
                     target = noise
 
-                loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                loss = train_util.conditional_loss(
+                    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                )
                 loss = loss.mean([1, 2, 3])
 
                 loss_weights = batch["loss_weights"]  # 各sampleごとのweight
@@ -471,6 +486,8 @@ def train(args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            optimizer_eval_if_needed()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:

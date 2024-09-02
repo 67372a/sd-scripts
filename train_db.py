@@ -224,25 +224,34 @@ def train(args):
         text_encoder.to(weight_dtype)
 
     # acceleratorがなんかよろしくやってくれるらしい
+    use_schedule_free_optimizer = args.optimizer_type.lower().endswith("schedulefree")
     if args.deepspeed:
         if args.train_text_encoder:
             ds_model = deepspeed_utils.prepare_deepspeed_model(args, unet=unet, text_encoder=text_encoder)
         else:
             ds_model = deepspeed_utils.prepare_deepspeed_model(args, unet=unet)
-        ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            ds_model, optimizer, train_dataloader, lr_scheduler
-        )
+        ds_model, optimizer, train_dataloader = accelerator.prepare(ds_model, optimizer, train_dataloader)
+        if not use_schedule_free_optimizer:
+            lr_scheduler = accelerator.prepare(lr_scheduler)
         training_models = [ds_model]
 
     else:
         if train_text_encoder:
-            unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
-            )
+            unet, text_encoder, optimizer, train_dataloader = accelerator.prepare(unet, text_encoder, optimizer, train_dataloader)
             training_models = [unet, text_encoder]
         else:
-            unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(unet, optimizer, train_dataloader, lr_scheduler)
+            unet, optimizer, train_dataloader = accelerator.prepare(unet, optimizer, train_dataloader)
             training_models = [unet]
+        if not use_schedule_free_optimizer:
+            lr_scheduler = accelerator.prepare(lr_scheduler)
+
+    # make lambda function for calling optimizer.train() and optimizer.eval() if schedule-free optimizer is used
+    if use_schedule_free_optimizer:
+        optimizer_train_if_needed = lambda: optimizer.train()
+        optimizer_eval_if_needed = lambda: optimizer.eval()
+    else:
+        optimizer_train_if_needed = lambda: None
+        optimizer_eval_if_needed = lambda: None
 
     if not train_text_encoder:
         text_encoder.to(accelerator.device, dtype=weight_dtype)  # to avoid 'cpu' vs 'cuda' error
@@ -307,6 +316,7 @@ def train(args):
             text_encoder.train()
 
         for step, batch in enumerate(train_dataloader):
+            optimizer_train_if_needed()
             current_step.value = global_step
             # 指定したステップ数でText Encoderの学習を止める
             if global_step == args.stop_text_encoder_training:
@@ -346,7 +356,9 @@ def train(args):
 
                 # Sample noise, sample a random timestep for each image, and add noise to the latents,
                 # with noise offset and/or multires noise if specified
-                noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+                noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
+                    args, noise_scheduler, latents
+                )
 
                 # Predict the noise residual
                 with accelerator.autocast():
@@ -358,7 +370,9 @@ def train(args):
                 else:
                     target = noise
 
-                loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                loss = train_util.conditional_loss(
+                    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                )
                 if args.masked_loss:
                     loss = apply_masked_loss(loss, batch)
                 loss = loss.mean([1, 2, 3])
@@ -386,6 +400,8 @@ def train(args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            optimizer_eval_if_needed()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
