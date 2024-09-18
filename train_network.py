@@ -41,6 +41,8 @@ from library.custom_train_functions import (
 )
 from library.utils import setup_logging, add_logging_arguments
 
+import tools.stochastic_accumulator as stochastic_accumulator
+
 setup_logging()
 import logging
 
@@ -1057,6 +1059,9 @@ class NetworkTrainer:
             params_itr.__next__()  # skip the second parameter. because CLIP first two parameters are embeddings
             param_3rd = params_itr.__next__()
             logger.info(f"text_encoder [{i}] dtype: {param_3rd.dtype}, device: {t_enc.device}")
+            
+        # apply stochastic grad accumulator hooks
+        stochastic_accumulator.StochasticAccumulator.assign_hooks(training_model)
 
         clean_memory_on_device(accelerator.device)
 
@@ -1181,6 +1186,9 @@ class NetworkTrainer:
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                            
+                    # apply grad buffer back
+                    stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(training_model)
 
                     optimizer.step()
                     lr_scheduler.step()
