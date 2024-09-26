@@ -993,9 +993,26 @@ class BaseDataset(torch.utils.data.Dataset):
         # sort by resolution
         image_infos.sort(key=lambda info: info.bucket_reso[0] * info.bucket_reso[1])
 
-        # split by resolution
-        batches = []
-        batch = []
+        # split by resolution and some conditions
+        class Condition:
+            def __init__(self, reso, flip_aug, alpha_mask, random_crop):
+                self.reso = reso
+                self.flip_aug = flip_aug
+                self.alpha_mask = alpha_mask
+                self.random_crop = random_crop
+
+            def __eq__(self, other):
+                return (
+                    self.reso == other.reso
+                    and self.flip_aug == other.flip_aug
+                    and self.alpha_mask == other.alpha_mask
+                    and self.random_crop == other.random_crop
+                )
+
+        batches: List[Tuple[Condition, List[ImageInfo]]] = []
+        batch: List[ImageInfo] = []
+        current_condition = None
+
         logger.info("checking cache validity...")
         for info in tqdm(image_infos):
             subset = self.image_to_subset[info.image_key]
@@ -1016,20 +1033,23 @@ class BaseDataset(torch.utils.data.Dataset):
                 if cache_available:  # do not add to batch
                     continue
 
-            # if last member of batch has different resolution, flush the batch
-            if len(batch) > 0 and batch[-1].bucket_reso != info.bucket_reso:
-                batches.append(batch)
+            # if batch is not empty and condition is changed, flush the batch. Note that current_condition is not None if batch is not empty
+            condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop)
+            if len(batch) > 0 and current_condition != condition:
+                batches.append((current_condition, batch))
                 batch = []
 
             batch.append(info)
+            current_condition = condition
 
             # if number of data in batch is enough, flush the batch
             if len(batch) >= caching_strategy.batch_size:
-                batches.append(batch)
+                batches.append((current_condition, batch))
                 batch = []
+                current_condition = None
 
         if len(batch) > 0:
-            batches.append(batch)
+            batches.append((current_condition, batch))
 
         # if cache to disk, don't cache latents in non-main process, set to info only
         if caching_strategy.cache_to_disk and not is_main_process:
@@ -1041,9 +1061,8 @@ class BaseDataset(torch.utils.data.Dataset):
 
         # iterate batches: batch doesn't have image here. image will be loaded in cache_batch_latents and discarded
         logger.info("caching latents...")
-        for batch in tqdm(batches, smoothing=1, total=len(batches)):
-            # cache_batch_latents(vae, cache_to_disk, batch, subset.flip_aug, subset.alpha_mask, subset.random_crop)
-            caching_strategy.cache_batch_latents(model, batch, subset.flip_aug, subset.alpha_mask, subset.random_crop)
+        for condition, batch in tqdm(batches, smoothing=1, total=len(batches)):
+            caching_strategy.cache_batch_latents(model, batch, condition.flip_aug, condition.alpha_mask, condition.random_crop)
 
     def cache_latents(self, vae, vae_batch_size=1, cache_to_disk=False, is_main_process=True, file_suffix=".npz"):
         # マルチGPUには対応していないので、そちらはtools/cache_latents.pyを使うこと
@@ -1054,9 +1073,26 @@ class BaseDataset(torch.utils.data.Dataset):
         # sort by resolution
         image_infos.sort(key=lambda info: info.bucket_reso[0] * info.bucket_reso[1])
 
-        # split by resolution
-        batches = []
-        batch = []
+        # split by resolution and some conditions
+        class Condition:
+            def __init__(self, reso, flip_aug, alpha_mask, random_crop):
+                self.reso = reso
+                self.flip_aug = flip_aug
+                self.alpha_mask = alpha_mask
+                self.random_crop = random_crop
+
+            def __eq__(self, other):
+                return (
+                    self.reso == other.reso
+                    and self.flip_aug == other.flip_aug
+                    and self.alpha_mask == other.alpha_mask
+                    and self.random_crop == other.random_crop
+                )
+
+        batches: List[Tuple[Condition, List[ImageInfo]]] = []
+        batch: List[ImageInfo] = []
+        current_condition = None
+
         logger.info("checking cache validity...")
         for info in tqdm(image_infos):
             subset = self.image_to_subset[info.image_key]
@@ -1077,28 +1113,31 @@ class BaseDataset(torch.utils.data.Dataset):
                 if cache_available:  # do not add to batch
                     continue
 
-            # if last member of batch has different resolution, flush the batch
-            if len(batch) > 0 and batch[-1].bucket_reso != info.bucket_reso:
-                batches.append(batch)
+            # if batch is not empty and condition is changed, flush the batch. Note that current_condition is not None if batch is not empty
+            condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop)
+            if len(batch) > 0 and current_condition != condition:
+                batches.append((current_condition, batch))
                 batch = []
 
             batch.append(info)
+            current_condition = condition
 
             # if number of data in batch is enough, flush the batch
             if len(batch) >= vae_batch_size:
-                batches.append(batch)
+                batches.append((current_condition, batch))
                 batch = []
+                current_condition = None
 
         if len(batch) > 0:
-            batches.append(batch)
+            batches.append((current_condition, batch))
 
         if cache_to_disk and not is_main_process:  # if cache to disk, don't cache latents in non-main process, set to info only
             return
 
         # iterate batches: batch doesn't have image, image will be loaded in cache_batch_latents and discarded
         logger.info("caching latents...")
-        for batch in tqdm(batches, smoothing=1, total=len(batches)):
-            cache_batch_latents(vae, cache_to_disk, batch, subset.flip_aug, subset.alpha_mask, subset.random_crop)
+        for condition, batch in tqdm(batches, smoothing=1, total=len(batches)):
+            cache_batch_latents(vae, cache_to_disk, batch, condition.flip_aug, condition.alpha_mask, condition.random_crop)
 
     def new_cache_text_encoder_outputs(self, models: List[Any], is_main_process: bool):
         r"""
@@ -2516,7 +2555,7 @@ def debug_dataset(train_dataset, show_input_ids=False):
                     if "alpha_masks" in example and example["alpha_masks"] is not None:
                         alpha_mask = example["alpha_masks"][j]
                         logger.info(f"alpha mask size: {alpha_mask.size()}")
-                        alpha_mask = (alpha_mask[0].numpy() * 255.0).astype(np.uint8)
+                        alpha_mask = (alpha_mask.numpy() * 255.0).astype(np.uint8)
                         if os.name == "nt":
                             cv2.imshow("alpha_mask", alpha_mask)
 
@@ -3273,7 +3312,11 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
         "--optimizer_type",
         type=str,
         default="",
-        help="Optimizer to use / オプティマイザの種類: AdamW (default), AdamW8bit, PagedAdamW, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, Lion, SGDNesterov, SGDNesterov8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, AdaFactor",
+        help="Optimizer to use / オプティマイザの種類: AdamW (default), AdamW8bit, PagedAdamW, PagedAdamW8bit, PagedAdamW32bit, "
+        "Lion8bit, PagedLion8bit, Lion, SGDNesterov, SGDNesterov8bit, "
+        "DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, "
+        "AdaFactor. "
+        "Also, you can use any optimizer by specifying the full path to the class, like 'bitsandbytes.optim.AdEMAMix8bit' or 'bitsandbytes.optim.PagedAdEMAMix8bit'.",
     )
 
     # backward compatibility
@@ -4325,7 +4368,7 @@ def resume_from_local_or_hf_if_specified(accelerator, args):
 
 
 def get_optimizer(args, trainable_params):
-    # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
+    # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, AdEMAMix8bit, PagedAdEMAMix8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
 
     optimizer_type = args.optimizer_type
     if args.use_8bit_adam:
@@ -4378,6 +4421,7 @@ def get_optimizer(args, trainable_params):
 
     lr = args.learning_rate
     optimizer = None
+    optimizer_class = None
 
     if optimizer_type == "Lion".lower():
         try:
@@ -4435,7 +4479,8 @@ def get_optimizer(args, trainable_params):
                     "No PagedLion8bit. The version of bitsandbytes installed seems to be old. Please install 0.39.0 or later. / PagedLion8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.39.0以上をインストールしてください"
                 )
 
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+        if optimizer_class is not None:
+            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "PagedAdamW".lower():
         logger.info(f"use PagedAdamW optimizer | {optimizer_kwargs}")
@@ -4710,6 +4755,7 @@ def get_optimizer(args, trainable_params):
         logger.info(f"wrap optimizer with ScheduleFreeWrapper | {schedulefree_wrapper_kwargs}")
     """
 
+    # for logging
     optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
     optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
 
@@ -5535,7 +5581,7 @@ def save_sd_model_on_train_end_common(
 
 
 def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device):
-    timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device='cpu')
+    timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
 
     if args.loss_type == "huber" or args.loss_type == "smooth_l1":
         if args.huber_schedule == "exponential":
