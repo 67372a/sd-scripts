@@ -41,8 +41,6 @@ from library.custom_train_functions import (
 )
 from library.utils import setup_logging, add_logging_arguments
 
-import tools.stochastic_accumulator as stochastic_accumulator
-
 setup_logging()
 import logging
 
@@ -1065,9 +1063,6 @@ class NetworkTrainer:
             param_3rd = params_itr.__next__()
             logger.info(f"text_encoder [{i}] dtype: {param_3rd.dtype}, device: {t_enc.device}")
             
-        # apply stochastic grad accumulator hooks
-        stochastic_accumulator.StochasticAccumulator.assign_hooks(training_model)
-
         clean_memory_on_device(accelerator.device)
 
         for epoch in range(epoch_to_start, num_train_epochs):
@@ -1186,9 +1181,6 @@ class NetworkTrainer:
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
                     accelerator.backward(loss)
-
-                    # apply grad buffer back
-                    stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(training_model)
 
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
