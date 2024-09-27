@@ -1186,15 +1186,16 @@ class NetworkTrainer:
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
                     accelerator.backward(loss)
+
+                    # apply grad buffer back
+                    stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(training_model)
+
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                             
-                    # apply grad buffer back
-                    stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(training_model)
-
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
