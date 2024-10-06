@@ -1196,7 +1196,8 @@ class NetworkTrainer:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
                         else: 
-                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, max_norm=float('inf')).item()
+                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                             
                     optimizer.step()
                     lr_scheduler.step()
