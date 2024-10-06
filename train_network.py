@@ -63,8 +63,12 @@ class NetworkTrainer:
         keys_scaled=None,
         mean_norm=None,
         maximum_norm=None,
+        grad_norm=None,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
+
+        if grad_norm is not None:
+            logs["train/grad_norm"] = grad_norm
 
         if keys_scaled is not None:
             logs["max_norm/keys_scaled"] = keys_scaled
@@ -1067,6 +1071,8 @@ class NetworkTrainer:
             
         clean_memory_on_device(accelerator.device)
 
+        grad_norm = 0.0
+
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
@@ -1188,7 +1194,9 @@ class NetworkTrainer:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
+                        else: 
+                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, max_norm=float('inf')).item()
                             
                     optimizer.step()
                     lr_scheduler.step()
@@ -1198,7 +1206,20 @@ class NetworkTrainer:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
                         args.scale_weight_norms, accelerator.device
                     )
-                    max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
+
+                    if isinstance(keys_scaled, torch.Tensor):
+                        #Unpack
+                        keys_scaled = keys_scaled.item()
+
+                    if isinstance(mean_norm, torch.Tensor):
+                        #Unpack
+                        mean_norm = mean_norm.item()
+
+                    if isinstance(maximum_norm, torch.Tensor):
+                        #Unpack
+                        maximum_norm = maximum_norm.item()
+
+                    max_mean_logs = {"Keys Scaled": keys_scaled, "Avg key norm": mean_norm}
                 else:
                     keys_scaled, mean_norm, maximum_norm = None, None, None
 
@@ -1231,15 +1252,19 @@ class NetworkTrainer:
                 current_loss = loss.detach().item()
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
-                logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**logs)
+                logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
                 if args.scale_weight_norms:
-                    progress_bar.set_postfix(**{**max_mean_logs, **logs})
+                    logs = {**max_mean_logs, **logs}
+
+                if args.max_grad_norm != 0.0 :
+                    logs = {'Grad Norm': grad_norm, **logs}
+
+                progress_bar.set_postfix(**logs)
 
                 if len(accelerator.trackers) > 0:
                     logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm
+                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm
                     )
                     accelerator.log(logs, step=global_step)
 
