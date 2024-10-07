@@ -65,6 +65,8 @@ class NetworkTrainer:
         mean_norm=None,
         maximum_norm=None,
         grad_norm=None,
+        current_val_loss=None,
+        average_val_loss=None,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
 
@@ -75,6 +77,10 @@ class NetworkTrainer:
             logs["max_norm/keys_scaled"] = keys_scaled
             logs["max_norm/average_key_norm"] = mean_norm
             logs["max_norm/max_key_norm"] = maximum_norm
+
+        if current_val_loss is not None:
+            logs["max_norm/keys_scaled"] = current_val_loss                      
+            logs["max_norm/keys_scaled"] = average_val_loss
 
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
@@ -254,61 +260,102 @@ class NetworkTrainer:
 
     # endregion
 
-    def process_val_batch(self, batch, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
-
+    def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
         total_loss = 0.0
         timesteps_list = [10, 350, 500, 650, 990]    
         with torch.no_grad():
             if "latents" in batch and batch["latents"] is not None:
-                latents = batch["latents"].to(accelerator.device)
+                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
             else:
                 # latentに変換
-                latents = vae.encode(batch["images"].to(accelerator.device, dtype=vae_dtype)).latent_dist.sample()
+                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                latents = latents.to(dtype=weight_dtype)
 
                 # NaNが含まれていれば警告を表示し0に置き換える
                 if torch.any(torch.isnan(latents)):
                     accelerator.print("NaN found in latents, replacing with zeros")
-                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
-            latents = latents * self.vae_scale_factor
-        b_size = latents.shape[0]
+                    latents = torch.nan_to_num(latents, 0, out=latents)
 
-        with torch.set_grad_enabled(False), accelerator.autocast():
-            # Get the text embedding for conditioning
-            if args.weighted_captions:
-                text_encoder_conds = get_weighted_text_embeddings(
-                    tokenizers[0],
-                    text_encoders[0],
-                    batch["captions"],
-                    accelerator.device,
-                    args.max_token_length // 75 if args.max_token_length else 1,
-                    clip_skip=args.clip_skip,
-                )
-            else:
-                text_encoder_conds = self.get_text_cond(
-                    args, accelerator, batch, tokenizers, text_encoders, weight_dtype
-                )
+            latents = self.shift_scale_latents(args, latents)
 
-        # Sample noise, sample a random timestep for each image, and add noise to the latents,
-        # with noise offset and/or multires noise if specified
-        
-        for fixed_timesteps in timesteps_list:
-            with torch.set_grad_enabled(False), accelerator.autocast():
-                noise = torch.randn_like(latents, device=latents.device)
-                b_size = latents.shape[0]
-                timesteps = torch.full((b_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                noise_pred = self.call_unet(
-                    args, accelerator, unet, noisy_latents, timesteps, text_encoder_conds, batch, weight_dtype
-                )
-                if args.v_parameterization:
-                    # v-parameterization training
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+            network_has_multiplier = hasattr(network, "set_multiplier")
+            # get multiplier for each sample
+            if network_has_multiplier:
+                multipliers = batch["network_multipliers"]
+                # if all multipliers are same, use single multiplier
+                if torch.all(multipliers == multipliers[0]):
+                    multipliers = multipliers[0].item()
                 else:
-                    target = noise
+                    raise NotImplementedError("multipliers for each sample is not supported yet")
+                # print(f"set multiplier: {multipliers}")
+                accelerator.unwrap_model(network).set_multiplier(multipliers)
 
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
+            text_encoder_conds = []
+            text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+            if text_encoder_outputs_list is not None:
+                text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
+            if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
+                with torch.set_grad_enabled(False), accelerator.autocast():
+                    # Get the text embedding for conditioning
+                    if args.weighted_captions:
+                        # SD only
+                        encoded_text_encoder_conds = get_weighted_text_embeddings(
+                            tokenizers[0],
+                            text_encoders[0],
+                            batch["captions"],
+                            accelerator.device,
+                            args.max_token_length // 75 if args.max_token_length else 1,
+                            clip_skip=args.clip_skip,
+                        )
+                    else:
+                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
+                            tokenize_strategy,
+                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                            input_ids,
+                        )
+                        if args.full_fp16:
+                            encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+
+                # if text_encoder_conds is not cached, use encoded_text_encoder_conds
+                if len(text_encoder_conds) == 0:
+                    text_encoder_conds = encoded_text_encoder_conds
+                else:
+                    # if encoded_text_encoder_conds is not None, update cached text_encoder_conds
+                    for i in range(len(encoded_text_encoder_conds)):
+                        if encoded_text_encoder_conds[i] is not None:
+                            text_encoder_conds[i] = encoded_text_encoder_conds[i]
+
+            for fixed_timesteps in timesteps_list:
+                # sample noise, call unet, get target
+                noise_pred, target, timesteps, huber_c, weighting = self.get_noise_pred_and_target(
+                    args,
+                    accelerator,
+                    noise_scheduler,
+                    latents,
+                    batch,
+                    text_encoder_conds,
+                    unet,
+                    network,
+                    weight_dtype,
+                    not args.network_train_text_encoder_only,
+                )
+
+                loss = train_util.conditional_loss(
+                    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                )
+                if weighting is not None:
+                    loss = loss * weighting
+                if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                    loss = apply_masked_loss(loss, batch)
                 loss = loss.mean([1, 2, 3])
-                loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
+
+                loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                loss = loss * loss_weights
+
+                # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
+                loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
                 total_loss += loss
 
@@ -1345,13 +1392,8 @@ class NetworkTrainer:
 
                 progress_bar.set_postfix(**logs)
 
-                if len(accelerator.trackers) > 0:
-                    logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm
-                    )
-                    accelerator.log(logs, step=global_step)
-                
                 if len(val_dataloader) > 0:
+                    optimizer_eval_fn()
                     if  (args.validation_every_n_step is not None and global_step % args.validation_every_n_step == 0) or (args.validation_every_n_step is None and step == len(train_dataloader) - 1) or global_step >= args.max_train_steps:
                         accelerator.print("Validating バリデーション処理...")
                         total_loss = 0.0
@@ -1359,17 +1401,21 @@ class NetworkTrainer:
                             validation_steps = min(args.max_validation_steps, len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
                             for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
                                 batch = next(cyclic_val_dataloader)
-                                loss = self.process_val_batch(batch, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
                                 total_loss += loss.detach().item()
                             current_loss = total_loss / validation_steps
                             val_loss_recorder.add(epoch=0, step=global_step, loss=current_loss)   
         
-                        if args.logging_dir is not None:
-                            logs = {"loss/current_val_loss": current_loss}
-                            accelerator.log(logs, step=global_step)                            
-                            avr_loss: float = val_loss_recorder.moving_average
-                            logs = {"loss/average_val_loss": avr_loss}
-                            accelerator.log(logs, step=global_step)
+                        logs = {"loss/current_val_loss": current_loss, **logs}                        
+                        avr_loss: float = val_loss_recorder.moving_average
+                        logs = {"loss/average_val_loss": avr_loss, **logs}
+                    optimizer_train_fn()
+
+                if len(accelerator.trackers) > 0:
+                    logs = self.generate_step_logs(
+                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm
+                    )
+                    accelerator.log(logs, step=global_step)
                                         
                 if global_step >= args.max_train_steps:
                     break
