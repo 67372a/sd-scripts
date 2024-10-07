@@ -315,67 +315,6 @@ class NetworkTrainer:
         average_loss = total_loss / len(timesteps_list)    
         return average_loss
 
-    def process_val_batch(self, batch, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
-
-        total_loss = 0.0
-        timesteps_list = [10, 350, 500, 650, 990]    
-        with torch.no_grad():
-            if "latents" in batch and batch["latents"] is not None:
-                latents = batch["latents"].to(accelerator.device)
-            else:
-                # latentに変換
-                latents = vae.encode(batch["images"].to(accelerator.device, dtype=vae_dtype)).latent_dist.sample()
-
-                # NaNが含まれていれば警告を表示し0に置き換える
-                if torch.any(torch.isnan(latents)):
-                    accelerator.print("NaN found in latents, replacing with zeros")
-                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
-            latents = latents * self.vae_scale_factor
-        b_size = latents.shape[0]
-
-        with torch.set_grad_enabled(False), accelerator.autocast():
-            # Get the text embedding for conditioning
-            if args.weighted_captions:
-                text_encoder_conds = get_weighted_text_embeddings(
-                    tokenizers[0],
-                    text_encoders[0],
-                    batch["captions"],
-                    accelerator.device,
-                    args.max_token_length // 75 if args.max_token_length else 1,
-                    clip_skip=args.clip_skip,
-                )
-            else:
-                text_encoder_conds = self.get_text_cond(
-                    args, accelerator, batch, tokenizers, text_encoders, weight_dtype
-                )
-
-        # Sample noise, sample a random timestep for each image, and add noise to the latents,
-        # with noise offset and/or multires noise if specified
-        
-        for fixed_timesteps in timesteps_list:
-            with torch.set_grad_enabled(False), accelerator.autocast():
-                noise = torch.randn_like(latents, device=latents.device)
-                b_size = latents.shape[0]
-                timesteps = torch.full((b_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                noise_pred = self.call_unet(
-                    args, accelerator, unet, noisy_latents, timesteps, text_encoder_conds, batch, weight_dtype
-                )
-                if args.v_parameterization:
-                    # v-parameterization training
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    target = noise
-
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
-                loss = loss.mean([1, 2, 3])
-                loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
-                loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-                total_loss += loss
-
-        average_loss = total_loss / len(timesteps_list)    
-        return average_loss
-
     def train(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
