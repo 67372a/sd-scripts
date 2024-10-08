@@ -3732,6 +3732,31 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="Use random strength between 0~ip_noise_gamma for input perturbation noise."
         + "/ input perturbation noiseにおいて、0からip_noise_gammaの間でランダムな強度を使用します。",
     )
+    parser.add_argument(
+        "--ip_noise_gamma_scaling_min",
+        type=float,
+        default=0.0,
+        help="The minimum value of IP noise gamma applied for any given timestep.",
+    )
+    parser.add_argument(
+        "--ip_noise_gamma_scaling_exponent",
+        type=float,
+        default=2.0,
+        help="The exponent used for any exponent / power / scaling based IP noise gamma scaling function.",
+    )
+    parser.add_argument(
+        "--ip_noise_gamma_scaling",
+        type=str,
+        default=None,
+        help="The timestep based scaling function to apply to ip_noise_gamma, leaving unset or set to none results in no scaling."
+        + "/ Options: none,linear,sine,exponential, logarithmic",
+    )
+    parser.add_argument(
+        "--ip_noise_gamma_last_channel_only",
+        action="store_true",
+        help="Set IP noise gamma to only be applied to the last channel.",
+    )
+    
     # parser.add_argument(
     #     "--perlin_noise",
     #     type=int,
@@ -5669,11 +5694,70 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
     if args.ip_noise_gamma:
-        if args.ip_noise_gamma_random_strength:
-            strength = torch.rand(1, device=latents.device) * args.ip_noise_gamma
+        gamma_max = args.ip_noise_gamma
+        gamma_min = getattr(args, 'ip_noise_gamma_scaling_min', 0.0)  # Default to 0.0 if not set
+        exponent = getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0)
+
+        # Determine the scaling type
+        scaling_type = getattr(args, 'ip_noise_gamma_scaling', 'none').lower()
+
+        # Compute the scaling factor based on the selected scaling type
+        # Normalize timesteps to the range [0, 1]
+        t = timesteps.float() / max_timestep  # t ranges from 0 to 1
+
+        if scaling_type == 'none':
+            scaling_factor = torch.ones_like(timesteps, dtype=torch.float32, device=latents.device)
+        elif scaling_type == 'linear':
+            scaling_factor = t
+        elif scaling_type == 'sine':
+            scaling_factor = torch.sin((math.pi / 2) * t)
+        elif scaling_type == 'exponential':
+            scaling_factor = t.pow(exponent)
+        elif scaling_type == 'logarithmic':
+            scaling_denominator = torch.log(
+                torch.tensor(float(max_timestep) + 1, device=latents.device)
+            )
+            scaling_factor = torch.log(timesteps.float() + 1) / scaling_denominator
         else:
-            strength = args.ip_noise_gamma
-        noisy_latents = noise_scheduler.add_noise(latents, noise + strength * torch.randn_like(latents), timesteps)
+            raise ValueError(f"Unknown ip_noise_gamma_scaling type: {scaling_type}")
+
+        # Ensure scaling_factor is in the range [0, 1]
+        scaling_factor = scaling_factor.clamp(0.0, 1.0)
+
+        # Apply the floor of gamma_min
+        strength = scaling_factor * gamma_max
+        strength = torch.maximum(strength, torch.tensor(gamma_min, device=latents.device))
+
+        # Reshape strength to match the dimensions of latents for broadcasting
+        strength = strength.view(-1, *[1] * (latents.ndim - 1))
+
+        if args.ip_noise_gamma_random_strength:
+            # Random strength scaled by the scaling factor
+            rand_strength = torch.rand(b_size, device=latents.device) * strength
+            strength = rand_strength
+
+        if args.ip_noise_gamma_last_channel_only:
+            # Create an extra noise tensor with zeros
+            extra_noise = torch.zeros_like(latents, device=latents.device)
+            
+            # Generate noise for the last channel
+            last_channel_noise = strength * torch.randn_like(latents[:, -1:, :, :])  # Note the slicing to keep dimensions
+            
+            # Assign the noise to the last channel
+            extra_noise[:, -1:, :, :] = last_channel_noise
+
+            # Combine the original noise with the extra noise
+            combined_noise = noise + extra_noise
+
+            # Add the combined noise to the latents
+            noisy_latents = noise_scheduler.add_noise(latents, combined_noise, timesteps)
+        else:
+            # Add the scaled noise to the latents
+            noisy_latents = noise_scheduler.add_noise(
+                latents,
+                noise + strength * torch.randn_like(latents),
+                timesteps
+            )
     else:
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 

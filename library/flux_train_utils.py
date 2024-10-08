@@ -383,24 +383,77 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
         weighting = torch.ones_like(sigmas)
     return weighting
 
+def get_noise(args, latents, noise, timesteps) -> torch.Tensor:
+    # Add noise to the latents according to the noise magnitude at each timestep
+    # (this is the forward diffusion process)
+    if args.ip_noise_gamma:
+        max_timestep = 1000.0
+        bsz, _, h, w = latents.shape
+        
+        gamma_max = args.ip_noise_gamma
+        gamma_min = getattr(args, 'ip_noise_gamma_scaling_min', 0.0)  # Default to 0.0 if not set
+        exponent = getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0)
+
+        # Determine the scaling type
+        scaling_type = getattr(args, 'ip_noise_gamma_scaling', 'none').lower()
+
+        # Compute the scaling factor based on the selected scaling type
+        # Normalize timesteps to the range [0, 1]
+        t = timesteps.float() / max_timestep  # t ranges from 0 to 1
+
+        if scaling_type == 'none':
+            scaling_factor = torch.ones_like(timesteps, dtype=torch.float32, device=latents.device)
+        elif scaling_type == 'linear':
+            scaling_factor = t
+        elif scaling_type == 'sine':
+            scaling_factor = torch.sin((math.pi / 2) * t)
+        elif scaling_type == 'exponential':
+            scaling_factor = t.pow(exponent)
+        elif scaling_type == 'logarithmic':
+            scaling_denominator = torch.log(
+                torch.tensor(float(max_timestep) + 1, device=latents.device)
+            )
+            scaling_factor = torch.log(timesteps.float() + 1) / scaling_denominator
+        else:
+            raise ValueError(f"Unknown ip_noise_gamma_scaling type: {scaling_type}")
+
+        # Ensure scaling_factor is in the range [0, 1]
+        scaling_factor = scaling_factor.clamp(0.0, 1.0)
+
+        # Apply the floor of gamma_min
+        strength = scaling_factor * gamma_max
+        strength = torch.maximum(strength, torch.tensor(gamma_min, device=latents.device))
+
+        # Reshape strength to match the dimensions of latents for broadcasting
+        strength = strength.view(-1, *[1] * (latents.ndim - 1))
+
+        if args.ip_noise_gamma_random_strength:
+            # Random strength scaled by the scaling factor
+            rand_strength = torch.rand(bsz, device=latents.device) * strength
+            strength = rand_strength
+
+        if args.ip_noise_gamma_last_channel_only:
+            # Create an extra noise tensor with zeros
+            extra_noise = torch.zeros_like(latents, device=latents.device)
+            
+            # Generate noise for the last channel
+            last_channel_noise = strength * torch.randn_like(latents[:, -1:, :, :])  # Note the slicing to keep dimensions
+            
+            # Assign the noise to the last channel
+            extra_noise[:, -1:, :, :] = last_channel_noise
+
+            # Combine the original noise with the extra noise
+            return noise + extra_noise
+        else:
+            return noise + strength * torch.randn_like(latents)
+    else:
+        return noise
 
 def get_noisy_model_input_and_timesteps(
     args, noise_scheduler, latents, noise, device, dtype
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     bsz, _, h, w = latents.shape
     sigmas = None
-
-    # Add noise to the latents according to the noise magnitude at each timestep
-    # (this is the forward diffusion process)
-    if args.ip_noise_gamma:
-        if args.ip_noise_gamma_random_strength:
-            strength = torch.rand(1, device=latents.device) * args.ip_noise_gamma
-        else:
-            strength = args.ip_noise_gamma
-        modified_noise = noise + strength * torch.randn_like(latents)
-    else:
-        modified_noise = noise
-
 
     if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
         # Simple random t-based noise sampling
@@ -412,7 +465,7 @@ def get_noisy_model_input_and_timesteps(
 
         timesteps = t * 1000.0
         t = t.view(-1, 1, 1, 1)
-        noisy_model_input = (1 - t) * latents + t * modified_noise
+        noisy_model_input = (1 - t) * latents + t * get_noise(args, latents, noise, timesteps)
     elif args.timestep_sampling == "shift":
         shift = args.discrete_flow_shift
         logits_norm = torch.randn(bsz, device=device)
@@ -422,7 +475,7 @@ def get_noisy_model_input_and_timesteps(
 
         t = timesteps.view(-1, 1, 1, 1)
         timesteps = timesteps * 1000.0
-        noisy_model_input = (1 - t) * latents + t * modified_noise
+        noisy_model_input = (1 - t) * latents + t * get_noise(args, latents, noise, timesteps)
     elif args.timestep_sampling == "flux_shift":
         logits_norm = torch.randn(bsz, device=device)
         logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
@@ -432,7 +485,7 @@ def get_noisy_model_input_and_timesteps(
 
         t = timesteps.view(-1, 1, 1, 1)
         timesteps = timesteps * 1000.0
-        noisy_model_input = (1 - t) * latents + t * modified_noise
+        noisy_model_input = (1 - t) * latents + t * get_noise(args, latents, noise, timesteps)
     else:
         # Sample a random timestep for each image
         # for weighting schemes where we sample timesteps non-uniformly
@@ -448,7 +501,7 @@ def get_noisy_model_input_and_timesteps(
 
         # Add noise according to flow matching.
         sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
-        noisy_model_input = sigmas * modified_noise + (1.0 - sigmas) * latents
+        noisy_model_input = sigmas * get_noise(args, latents, noise, timesteps) + (1.0 - sigmas) * latents
 
     return noisy_model_input, timesteps, sigmas
 
