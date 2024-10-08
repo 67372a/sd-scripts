@@ -391,8 +391,8 @@ def get_noise(args, latents, noise, timesteps) -> torch.Tensor:
         bsz, _, h, w = latents.shape
         
         gamma_max = args.ip_noise_gamma
-        gamma_min = getattr(args, 'ip_noise_gamma_scaling_min', 0.0)  # Default to 0.0 if not set
-        exponent = getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0)
+        gamma_min = float(getattr(args, 'ip_noise_gamma_scaling_min', 0.0))  # Default to 0.0 if not set
+        exponent = float(getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0))
 
         # Determine the scaling type
         scaling_type = getattr(args, 'ip_noise_gamma_scaling', 'none').lower()

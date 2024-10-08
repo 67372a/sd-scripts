@@ -3747,7 +3747,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
     parser.add_argument(
         "--ip_noise_gamma_scaling",
         type=str,
-        default=None,
+        default="none",
         help="The timestep based scaling function to apply to ip_noise_gamma, leaving unset or set to none results in no scaling."
         + "/ Options: none,linear,sine,exponential, logarithmic",
     )
@@ -5695,8 +5695,8 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
     # (this is the forward diffusion process)
     if args.ip_noise_gamma:
         gamma_max = args.ip_noise_gamma
-        gamma_min = getattr(args, 'ip_noise_gamma_scaling_min', 0.0)  # Default to 0.0 if not set
-        exponent = getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0)
+        gamma_min = float(getattr(args, 'ip_noise_gamma_scaling_min', 0.0))  # Default to 0.0 if not set
+        exponent = float(getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0))
 
         # Determine the scaling type
         scaling_type = getattr(args, 'ip_noise_gamma_scaling', 'none').lower()
