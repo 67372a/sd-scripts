@@ -238,8 +238,8 @@ class ConfigSanitizer:
         "enable_bucket": bool,
         "max_bucket_reso": int,
         "min_bucket_reso": int,
-        "validation_seed": int,
-        "validation_split": float,        
+        "validation_seed": str,
+        "validation_split": str,        
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "network_multiplier": float,
         
@@ -490,7 +490,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
     val_datasets:List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
 
     for dataset_blueprint in dataset_group_blueprint.datasets:
-        if dataset_blueprint.params.validation_split <= 0.0:
+        if float(dataset_blueprint.params.validation_split) <= 0.0:
             continue
         if dataset_blueprint.is_controlnet:
             subset_klass = ControlNetSubset
@@ -508,7 +508,6 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
             subset_blueprint.params.color_aug = False
             subset_blueprint.params.flip_aug = False
             subset_blueprint.params.random_crop = False
-            subset_blueprint.params.random_crop = None
             subset_blueprint.params.caption_dropout_rate = 0.0
             subset_blueprint.params.caption_dropout_every_n_epochs = 0
             subset_blueprint.params.caption_tag_dropout_rate = 0.0
