@@ -43,6 +43,7 @@ from library.utils import setup_logging, add_logging_arguments
 
 setup_logging()
 import logging
+import itertools
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,8 @@ class NetworkTrainer:
         mean_norm=None,
         maximum_norm=None,
         grad_norm=None,
+        current_val_loss=None,
+        average_val_loss=None,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
 
@@ -74,6 +77,10 @@ class NetworkTrainer:
             logs["max_norm/keys_scaled"] = keys_scaled
             logs["max_norm/average_key_norm"] = mean_norm
             logs["max_norm/max_key_norm"] = maximum_norm
+
+        if current_val_loss is not None:
+            logs["loss/current_val_loss"] = current_val_loss                      
+            logs["loss/average_val_loss"] = average_val_loss
 
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
@@ -191,13 +198,15 @@ class NetworkTrainer:
         network,
         weight_dtype,
         train_unet,
+        fixed_timesteps=None,
+        train=True
     ):
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
-        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps)
 
         # ensure the hidden state will require grad
-        if args.gradient_checkpointing:
+        if train and args.gradient_checkpointing:
             for x in noisy_latents:
                 x.requires_grad_(True)
             for t in text_encoder_conds:
@@ -209,7 +218,7 @@ class NetworkTrainer:
                 args,
                 accelerator,
                 unet,
-                noisy_latents.requires_grad_(train_unet),
+                noisy_latents.requires_grad_(train and train_unet),
                 timesteps,
                 text_encoder_conds,
                 batch,
@@ -252,6 +261,114 @@ class NetworkTrainer:
         text_encoder.text_model.embeddings.to(dtype=weight_dtype)
 
     # endregion
+
+    def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
+        total_loss = 0.0
+        timesteps_list = [10, 350, 500, 650, 990]    
+        with torch.no_grad():
+            if "latents" in batch and batch["latents"] is not None:
+                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+            else:
+                # latentに変換
+                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                latents = latents.to(dtype=weight_dtype)
+
+                # NaNが含まれていれば警告を表示し0に置き換える
+                if torch.any(torch.isnan(latents)):
+                    accelerator.print("NaN found in latents, replacing with zeros")
+                    latents = torch.nan_to_num(latents, 0, out=latents)
+
+            latents = self.shift_scale_latents(args, latents)
+
+            network_has_multiplier = hasattr(network, "set_multiplier")
+            # get multiplier for each sample
+            if network_has_multiplier:
+                multipliers = batch["network_multipliers"]
+                # if all multipliers are same, use single multiplier
+                if torch.all(multipliers == multipliers[0]):
+                    multipliers = multipliers[0].item()
+                else:
+                    raise NotImplementedError("multipliers for each sample is not supported yet")
+                # print(f"set multiplier: {multipliers}")
+                accelerator.unwrap_model(network).set_multiplier(multipliers)
+
+            text_encoder_conds = []
+            text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+            if text_encoder_outputs_list is not None:
+                text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
+            if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
+                with torch.set_grad_enabled(False), accelerator.autocast():
+                    # Get the text embedding for conditioning
+                    if args.weighted_captions:
+                        # SD only
+                        encoded_text_encoder_conds = get_weighted_text_embeddings(
+                            tokenizers[0],
+                            text_encoders[0],
+                            batch["captions"],
+                            accelerator.device,
+                            args.max_token_length // 75 if args.max_token_length else 1,
+                            clip_skip=args.clip_skip,
+                        )
+                    else:
+                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
+                            tokenize_strategy,
+                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                            input_ids,
+                        )
+                        if args.full_fp16:
+                            encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+
+                # if text_encoder_conds is not cached, use encoded_text_encoder_conds
+                if len(text_encoder_conds) == 0:
+                    text_encoder_conds = encoded_text_encoder_conds
+                else:
+                    # if encoded_text_encoder_conds is not None, update cached text_encoder_conds
+                    for i in range(len(encoded_text_encoder_conds)):
+                        if encoded_text_encoder_conds[i] is not None:
+                            text_encoder_conds[i] = encoded_text_encoder_conds[i]
+
+            batch_size = latents.shape[0]
+            for fixed_timesteps in timesteps_list:
+                with torch.set_grad_enabled(False), accelerator.autocast():
+                    timesteps = torch.full((batch_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
+
+                    # sample noise, call unet, get target
+                    noise_pred, target, timesteps, huber_c, weighting = self.get_noise_pred_and_target(
+                        args,
+                        accelerator,
+                        noise_scheduler,
+                        latents,
+                        batch,
+                        text_encoder_conds,
+                        unet,
+                        network,
+                        weight_dtype,
+                        not args.network_train_text_encoder_only,
+                        timesteps,
+                        False,
+                    )
+
+                    loss = train_util.conditional_loss(
+                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                    )
+                    if weighting is not None:
+                        loss = loss * weighting
+                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                        loss = apply_masked_loss(loss, batch)
+                    loss = loss.mean([1, 2, 3])
+
+                    loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                    loss = loss * loss_weights
+
+                    # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
+                    loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                    total_loss += loss
+
+        average_loss = total_loss / len(timesteps_list)    
+        return average_loss
 
     def train(self, args):
         session_id = random.randint(0, 2**32)
@@ -318,11 +435,12 @@ class NetworkTrainer:
                     }
 
             blueprint = blueprint_generator.generate(user_config, args)
-            train_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+            train_dataset_group, val_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
         else:
             # use arbitrary dataset class
             train_dataset_group = train_util.load_arbitrary_dataset(args)
-
+            val_dataset_group = None # placeholder until validation dataset supported for arbitrary
+            
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
@@ -342,8 +460,14 @@ class NetworkTrainer:
             assert (
                 train_dataset_group.is_latent_cacheable()
             ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
-
-        self.assert_extra_args(args, train_dataset_group)  # may change some args
+            if val_dataset_group is not None:
+                assert (
+                    val_dataset_group.is_latent_cacheable()
+                ), "when caching validation latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+              
+        self.assert_extra_args(args, train_dataset_group)
+        if val_dataset_group is not None:
+            self.assert_extra_args(args, val_dataset_group)
 
         # acceleratorを準備する
         logger.info("preparing accelerator")
@@ -389,7 +513,9 @@ class NetworkTrainer:
             vae.eval()
 
             train_dataset_group.new_cache_latents(vae, accelerator.is_main_process)
-
+            if val_dataset_group is not None:
+                print("Cache validation latents...")
+                val_dataset_group.new_cache_latents(vae, accelerator.is_main_process)                
             vae.to("cpu")
             clean_memory_on_device(accelerator.device)
 
@@ -513,6 +639,9 @@ class NetworkTrainer:
         # some strategies can be None
         train_dataset_group.set_current_strategies()
 
+        if val_dataset_group is not None:
+            val_dataset_group.set_current_strategies()
+
         # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
         n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
 
@@ -520,6 +649,15 @@ class NetworkTrainer:
             train_dataset_group,
             batch_size=1,
             shuffle=True,
+            collate_fn=collator,
+            num_workers=n_workers,
+            persistent_workers=args.persistent_data_loader_workers,
+        )
+        
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset_group if val_dataset_group is not None else [],
+            shuffle=False,
+            batch_size=1,
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
@@ -621,6 +759,10 @@ class NetworkTrainer:
                 network, optimizer, train_dataloader, lr_scheduler
             )
             training_model = network
+
+        if val_dataset_group is not None:
+            val_dataloader = accelerator.prepare(val_dataloader)
+            cyclic_val_dataloader = itertools.cycle(val_dataloader)
 
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required
@@ -1004,6 +1146,8 @@ class NetworkTrainer:
             )
 
         loss_recorder = train_util.LossRecorder()
+        val_loss_recorder = train_util.LossRecorder()
+        
         del train_dataset_group
 
         # callback for step start
@@ -1094,7 +1238,6 @@ class NetworkTrainer:
 
                 with accelerator.accumulate(training_model):
                     on_step_start(text_encoder, unet)
-
                     if "latents" in batch and batch["latents"] is not None:
                         latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                     else:
@@ -1187,7 +1330,7 @@ class NetworkTrainer:
                     loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-
+                    
                     accelerator.backward(loss)
 
                     if accelerator.sync_gradients:
@@ -1263,19 +1406,40 @@ class NetworkTrainer:
 
                 progress_bar.set_postfix(**logs)
 
+                if len(val_dataloader) > 0:
+                    if (args.validation_every_n_step is not None and global_step % int(args.validation_every_n_step) == 0) or (args.validation_every_n_step is None and step == len(train_dataloader) - 1) or global_step >= args.max_train_steps:
+                        accelerator.print("Validating バリデーション処理...")
+                        optimizer_eval_fn()
+                        total_loss = 0.0
+                        with torch.no_grad():
+                            validation_steps = min(int(args.max_validation_steps), len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
+                            for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
+                                batch = next(cyclic_val_dataloader)
+                                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                                total_loss += loss.detach().item()
+                            current_val_loss = total_loss / validation_steps
+                            val_loss_recorder.add(epoch=0, step=global_step, loss=current_val_loss)   
+        
+                        logs = {"loss/current_val_loss": current_val_loss, **logs}                        
+                        average_val_loss: float = val_loss_recorder.moving_average
+                        logs = {"loss/average_val_loss": average_val_loss, **logs}
+                        optimizer_train_fn()
+                else:
+                    current_val_loss, average_val_loss = None, None
+
                 if len(accelerator.trackers) > 0:
                     logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm
+                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, current_val_loss, average_val_loss
                     )
                     accelerator.log(logs, step=global_step)
-
+                                        
                 if global_step >= args.max_train_steps:
                     break
 
             if len(accelerator.trackers) > 0:
                 logs = {"loss/epoch": loss_recorder.moving_average}
                 accelerator.log(logs, step=epoch + 1)
-
+                            
             accelerator.wait_for_everyone()
 
             # 指定エポックごとにモデルを保存
@@ -1438,6 +1602,30 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
     )
+    parser.add_argument(
+        "--validation_seed",
+        type=int,
+        default=None,
+        help="Validation seed"
+    )
+    parser.add_argument(
+        "--validation_split",
+        type=float,
+        default=0.0,
+        help="Split for validation images out of the training dataset"
+    )    
+    parser.add_argument(
+        "--validation_every_n_step",
+        type=int,
+        default=None,
+        help="Number of train steps for counting validation loss. By default, validation per train epoch is performed"
+    )    
+    parser.add_argument(
+        "--max_validation_steps",
+        type=int,
+        default=None,
+        help="Number of max validation steps for counting validation loss. By default, validation will run entire validation dataset"
+    )    
     parser.add_argument(
         "--skip_until_initial_step",
         action="store_true",

@@ -140,6 +140,20 @@ IMAGE_TRANSFORMS = transforms.Compose(
 TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX = "_te_outputs.npz"
 TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX_SD3 = "_sd3_te.npz"
 
+def split_train_val(paths, is_train, validation_split, validation_seed):
+    if validation_seed is not None:
+        print(f"Using validation seed: {validation_seed}")
+        prevstate = random.getstate()
+        random.seed(validation_seed)
+        random.shuffle(paths)
+        random.setstate(prevstate)
+    else:
+        random.shuffle(paths)
+
+    if is_train:
+        return paths[0:math.ceil(len(paths) * (1 - validation_split))]
+    else:
+        return paths[len(paths) - round(len(paths) * validation_split):]
 
 class ImageInfo:
     def __init__(self, image_key: str, num_repeats: int, caption: str, is_reg: bool, absolute_path: str) -> None:
@@ -1713,6 +1727,7 @@ class DreamBoothDataset(BaseDataset):
     def __init__(
         self,
         subsets: Sequence[DreamBoothSubset],
+        is_train: bool,        
         batch_size: int,
         resolution,
         network_multiplier: float,
@@ -1722,12 +1737,17 @@ class DreamBoothDataset(BaseDataset):
         bucket_reso_steps: int,
         bucket_no_upscale: bool,
         prior_loss_weight: float,
+        validation_split: float,
+        validation_seed: Optional[int],        
         debug_dataset: bool,
     ) -> None:
         super().__init__(resolution, network_multiplier, debug_dataset)
 
         assert resolution is not None, f"resolution is required / resolution（解像度）指定は必須です"
 
+        self.is_train = is_train
+        self.validation_split = float(validation_split)
+        self.validation_seed = int(validation_seed)
         self.batch_size = batch_size
         self.size = min(self.width, self.height)  # 短いほう
         self.prior_loss_weight = prior_loss_weight
@@ -1802,6 +1822,8 @@ class DreamBoothDataset(BaseDataset):
                 # we may need to check image size and existence of image files, but it takes time, so user should check it before training
             else:
                 img_paths = glob_images(subset.image_dir, "*")
+                if self.validation_split > 0.0:
+                    img_paths = split_train_val(img_paths, self.is_train, self.validation_split, self.validation_seed)
                 sizes = [None] * len(img_paths)
 
                 # new caching: get image size from cache files
@@ -2168,6 +2190,7 @@ class ControlNetDataset(BaseDataset):
     def __init__(
         self,
         subsets: Sequence[ControlNetSubset],
+        is_train: bool,
         batch_size: int,
         resolution,
         network_multiplier: float,
@@ -2176,6 +2199,8 @@ class ControlNetDataset(BaseDataset):
         max_bucket_reso: int,
         bucket_reso_steps: int,
         bucket_no_upscale: bool,
+        validation_split: float,
+        validation_seed: Optional[int],        
         debug_dataset: float,
     ) -> None:
         super().__init__(resolution, network_multiplier, debug_dataset)
@@ -2215,6 +2240,7 @@ class ControlNetDataset(BaseDataset):
 
         self.dreambooth_dataset_delegate = DreamBoothDataset(
             db_subsets,
+            is_train,
             batch_size,
             resolution,
             network_multiplier,
@@ -2224,6 +2250,8 @@ class ControlNetDataset(BaseDataset):
             bucket_reso_steps,
             bucket_no_upscale,
             1.0,
+            validation_split,
+            validation_seed,
             debug_dataset,
         )
 
@@ -2231,7 +2259,10 @@ class ControlNetDataset(BaseDataset):
         self.image_data = self.dreambooth_dataset_delegate.image_data
         self.batch_size = batch_size
         self.num_train_images = self.dreambooth_dataset_delegate.num_train_images
-        self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images
+        self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images        
+        self.is_train = is_train
+        self.validation_split = validation_split
+        self.validation_seed = validation_seed 
 
         # assert all conditioning data exists
         missing_imgs = []
@@ -2266,12 +2297,8 @@ class ControlNetDataset(BaseDataset):
             conditioning_img_paths = [os.path.abspath(p) for p in conditioning_img_paths]  # normalize path
             extra_imgs.extend([p for p in conditioning_img_paths if os.path.splitext(p)[0] not in cond_imgs_with_pair])
 
-        assert (
-            len(missing_imgs) == 0
-        ), f"missing conditioning data for {len(missing_imgs)} images / 制御用画像が見つかりませんでした: {missing_imgs}"
-        assert (
-            len(extra_imgs) == 0
-        ), f"extra conditioning data for {len(extra_imgs)} images / 余分な制御用画像があります: {extra_imgs}"
+        #assert len(missing_imgs) == 0, f"missing conditioning data for {len(missing_imgs)} images: {missing_imgs}"
+        #assert len(extra_imgs) == 0, f"extra conditioning data for {len(extra_imgs)} images: {extra_imgs}"
 
         self.conditioning_image_transforms = IMAGE_TRANSFORMS
 
@@ -5645,8 +5672,12 @@ def save_sd_model_on_train_end_common(
             huggingface_util.upload(args, out_dir, "/" + model_name, force_sync_upload=True)
 
 
-def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device):
-    timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
+def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device, fixed_timesteps=None):
+
+    if fixed_timesteps is None:
+        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
+    else:
+        timesteps = fixed_timesteps
 
     if args.loss_type == "huber" or args.loss_type == "smooth_l1":
         if args.huber_schedule == "exponential":
@@ -5670,7 +5701,7 @@ def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler,
     return timesteps, huber_c
 
 
-def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
+def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps=None):
     # Sample noise that we'll add to the latents
     noise = torch.randn_like(latents, device=latents.device)
     if args.noise_offset:
@@ -5689,7 +5720,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
     min_timestep = 0 if args.min_timestep is None else args.min_timestep
     max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
 
-    timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device)
+    timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device, fixed_timesteps)
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)

@@ -2,7 +2,6 @@
 # XXX dropped option: fine_tune
 
 import argparse
-import itertools
 import math
 import os
 from multiprocessing import Value
@@ -42,11 +41,9 @@ import library.strategy_sd as strategy_sd
 
 setup_logging()
 import logging
+import itertools
 
 logger = logging.getLogger(__name__)
-
-# perlin_noise,
-
 
 def train(args):
     train_util.verify_training_args(args)
@@ -89,7 +86,7 @@ def train(args):
             }
 
         blueprint = blueprint_generator.generate(user_config, args)
-        train_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+        train_dataset_group, val_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
     else:
         train_dataset_group = train_util.load_arbitrary_dataset(args)
 
@@ -322,6 +319,7 @@ def train(args):
         accelerator.log({}, step=0)
 
     loss_recorder = train_util.LossRecorder()
+
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
         current_epoch.value = epoch + 1
@@ -549,7 +547,6 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
     )
-
     return parser
 
 
