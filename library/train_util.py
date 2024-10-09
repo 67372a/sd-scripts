@@ -4918,6 +4918,11 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         for arg in args.lr_scheduler_args:
             key, value = arg.split("=")
             value = ast.literal_eval(value)
+
+            # TODO temp fix for warmup and first cycle steps pending UI changes
+            if (key == 'warmup_steps' or key == 'first_cycle_max_steps') and float(args.validation_split) > 0.0:
+                value = math.floor(value * (1.0 - float(args.validation_split)))
+
             lr_scheduler_kwargs[key] = value
 
     def wrap_check_needless_num_warmup_steps(return_vals):
