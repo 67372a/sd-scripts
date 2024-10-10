@@ -370,6 +370,52 @@ class NetworkTrainer:
         average_loss = total_loss / len(timesteps_list)    
         return average_loss
 
+    def calculate_val_loss(self, 
+                           epoch, 
+                           global_step,
+                           val_loss_recorder,
+                           val_dataloader,
+                           cyclic_val_dataloader,
+                           network, 
+                           tokenizers, 
+                           tokenize_strategy, 
+                           text_encoders, 
+                           text_encoding_strategy, 
+                           unet, 
+                           vae, 
+                           noise_scheduler, 
+                           vae_dtype, 
+                           weight_dtype, 
+                           accelerator, 
+                           args, 
+                           train_text_encoder=True):
+        if global_step != 0:
+            if args.validation_split is None:
+                return None, None, None
+            if args.validation_every_n_step is None:
+                # sample_every_n_steps は無視する
+                if epoch is None:
+                    return None, None, None
+            else:
+                if global_step % int(args.validation_every_n_step) != 0 or epoch is not None:  # steps is not divisible or end of epoch
+                    return None, None, None
+            
+        accelerator.print("Validating バリデーション処理...")
+        total_loss = 0.0
+        with torch.no_grad():
+            validation_steps = min(int(args.max_validation_steps), len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
+            for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
+                batch = next(cyclic_val_dataloader)
+                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                total_loss += loss.detach().item()
+            current_val_loss = total_loss / validation_steps
+            val_loss_recorder.add(epoch=0, step=global_step, loss=current_val_loss)   
+                     
+        average_val_loss: float = val_loss_recorder.moving_average
+        logs = {"loss/current_val_loss": current_val_loss, "loss/average_val_loss": average_val_loss}
+
+        return current_val_loss, average_val_loss, logs
+
     def train(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
@@ -1189,9 +1235,13 @@ class NetworkTrainer:
             text_encoders = []
             text_encoder = None
 
+        grad_norm = 0.0
+        current_val_loss, average_val_loss, val_logs = None, None, None
+
         # For --sample_at_first
         optimizer_eval_fn()
         self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(0, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
         optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1214,8 +1264,6 @@ class NetworkTrainer:
             logger.info(f"text_encoder [{i}] dtype: {param_3rd.dtype}, device: {t_enc.device}")
             
         clean_memory_on_device(accelerator.device)
-
-        grad_norm = 0.0
 
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
@@ -1335,11 +1383,10 @@ class NetworkTrainer:
 
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                        params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                         if args.max_grad_norm != 0.0:
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
                         else: 
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                             
                     optimizer.step()
@@ -1377,6 +1424,8 @@ class NetworkTrainer:
                         accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                     )
 
+                    current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(None, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                         accelerator.wait_for_everyone()
@@ -1398,6 +1447,9 @@ class NetworkTrainer:
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
+                if val_logs:
+                    logs = {**val_logs, **logs}
+
                 if args.scale_weight_norms:
                     logs = {**max_mean_logs, **logs}
 
@@ -1405,27 +1457,6 @@ class NetworkTrainer:
                     logs = {'Grad Norm': grad_norm, **logs}
 
                 progress_bar.set_postfix(**logs)
-
-                if len(val_dataloader) > 0:
-                    if (args.validation_every_n_step is not None and global_step % int(args.validation_every_n_step) == 0) or (args.validation_every_n_step is None and step == len(train_dataloader) - 1) or global_step >= args.max_train_steps:
-                        accelerator.print("Validating バリデーション処理...")
-                        optimizer_eval_fn()
-                        total_loss = 0.0
-                        with torch.no_grad():
-                            validation_steps = min(int(args.max_validation_steps), len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
-                            for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
-                                batch = next(cyclic_val_dataloader)
-                                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
-                                total_loss += loss.detach().item()
-                            current_val_loss = total_loss / validation_steps
-                            val_loss_recorder.add(epoch=0, step=global_step, loss=current_val_loss)   
-        
-                        logs = {"loss/current_val_loss": current_val_loss, **logs}                        
-                        average_val_loss: float = val_loss_recorder.moving_average
-                        logs = {"loss/average_val_loss": average_val_loss, **logs}
-                        optimizer_train_fn()
-                else:
-                    current_val_loss, average_val_loss = None, None
 
                 if len(accelerator.trackers) > 0:
                     logs = self.generate_step_logs(
@@ -1457,7 +1488,9 @@ class NetworkTrainer:
 
                     if args.save_state:
                         train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-
+            current_val_loss, average_val_loss, logs = self.calculate_val_loss(epoch + 1, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+            
+            
             self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             optimizer_train_fn()
 
