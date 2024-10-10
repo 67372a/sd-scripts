@@ -340,6 +340,8 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         network,
         weight_dtype,
         train_unet,
+        fixed_timesteps=None,
+        train=True
     ):
         # Sample noise that we'll add to the latents
         noise = torch.randn_like(latents)
@@ -347,7 +349,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
         # get noisy model input and timesteps
         noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype
+            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype, fixed_timesteps, train
         )
 
         # pack latents and get img_ids
@@ -360,7 +362,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
 
         # ensure the hidden state will require grad
-        if args.gradient_checkpointing:
+        if args.gradient_checkpointing and train:
             noisy_model_input.requires_grad_(True)
             for t in text_encoder_conds:
                 if t.dtype.is_floating_point:
@@ -415,24 +417,25 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 unet.to(accelerator.device)
 
                 # lower model requires grad
-                intermediate_img.requires_grad_(True)
-                intermediate_txt.requires_grad_(True)
-                vec.requires_grad_(True)
-                pe.requires_grad_(True)
+                if train:
+                    intermediate_img.requires_grad_(True)
+                    intermediate_txt.requires_grad_(True)
+                    vec.requires_grad_(True)
+                    pe.requires_grad_(True)
                 model_pred = unet(img=intermediate_img, txt=intermediate_txt, vec=vec, pe=pe, txt_attention_mask=t5_attn_mask)
 
         # unpack latents
         model_pred = flux_utils.unpack_latents(model_pred, packed_latent_height, packed_latent_width)
 
         # apply model prediction type
-        model_pred, weighting = flux_train_utils.apply_model_prediction_type(args, model_pred, noisy_model_input, sigmas)
+        model_pred, weighting = flux_train_utils.apply_model_prediction_type(args, model_pred, noisy_model_input, sigmas, train)
 
         # flow matching loss: this is different from SD3
         target = noise - latents
 
         return model_pred, target, timesteps, None, weighting
 
-    def post_process_loss(self, loss, args, timesteps, noise_scheduler):
+    def post_process_loss(self, loss, args, timesteps, noise_scheduler, train=True):
         return loss
 
     def get_sai_model_spec(self, args):
