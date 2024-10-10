@@ -5680,14 +5680,14 @@ def save_sd_model_on_train_end_common(
             huggingface_util.upload(args, out_dir, "/" + model_name, force_sync_upload=True)
 
 
-def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device, fixed_timesteps=None):
+def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device, fixed_timesteps=None, train=True):
 
     if fixed_timesteps is None:
         timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
     else:
         timesteps = fixed_timesteps
 
-    if args.loss_type == "huber" or args.loss_type == "smooth_l1":
+    if (args.loss_type == "huber" or args.loss_type == "smooth_l1") and train == True:
         if args.huber_schedule == "exponential":
             alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
             huber_c = torch.exp(-alpha * timesteps)
@@ -5700,7 +5700,7 @@ def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler,
         else:
             raise NotImplementedError(f"Unknown Huber loss schedule {args.huber_schedule}!")
         huber_c = huber_c.to(device)
-    elif args.loss_type == "l2":
+    elif args.loss_type == "l2" or train == False:
         huber_c = None  # may be anything, as it's not used
     else:
         raise NotImplementedError(f"Unknown loss type {args.loss_type}")
@@ -5709,16 +5709,16 @@ def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler,
     return timesteps, huber_c
 
 
-def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps=None):
+def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps=None, train=True):
     # Sample noise that we'll add to the latents
     noise = torch.randn_like(latents, device=latents.device)
-    if args.noise_offset:
+    if args.noise_offset and train:
         if args.noise_offset_random_strength:
             noise_offset = torch.rand(1, device=latents.device) * args.noise_offset
         else:
             noise_offset = args.noise_offset
         noise = custom_train_functions.apply_noise_offset(latents, noise, noise_offset, args.adaptive_noise_scale)
-    if args.multires_noise_iterations:
+    if args.multires_noise_iterations and train:
         noise = custom_train_functions.pyramid_noise_like(
             noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
         )
@@ -5728,11 +5728,11 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
     min_timestep = 0 if args.min_timestep is None else args.min_timestep
     max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
 
-    timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device, fixed_timesteps)
+    timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device, fixed_timesteps, train)
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
-    if args.ip_noise_gamma:
+    if args.ip_noise_gamma and train:
         gamma_max = args.ip_noise_gamma
         gamma_min = float(getattr(args, 'ip_noise_gamma_scaling_min', 0.0))  # Default to 0.0 if not set
         exponent = float(getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0))

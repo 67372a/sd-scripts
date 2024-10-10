@@ -203,7 +203,7 @@ class NetworkTrainer:
     ):
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
-        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps)
+        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps, train)
 
         # ensure the hidden state will require grad
         if train and args.gradient_checkpointing:
@@ -233,14 +233,14 @@ class NetworkTrainer:
 
         return noise_pred, target, timesteps, huber_c, None
 
-    def post_process_loss(self, loss, args, timesteps, noise_scheduler):
-        if args.min_snr_gamma:
+    def post_process_loss(self, loss, args, timesteps, noise_scheduler, train=True):
+        if args.min_snr_gamma and train:
             loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
-        if args.scale_v_pred_loss_like_noise_pred:
+        if args.scale_v_pred_loss_like_noise_pred and train:
             loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-        if args.v_pred_like_loss:
+        if args.v_pred_like_loss and train:
             loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
-        if args.debiased_estimation_loss:
+        if args.debiased_estimation_loss and train:
             loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
         return loss
 
@@ -350,10 +350,11 @@ class NetworkTrainer:
                     )
 
                     loss = train_util.conditional_loss(
-                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                        noise_pred.float(), target.float(), reduction="none", loss_type="l2", huber_c=huber_c
                     )
-                    if weighting is not None:
-                        loss = loss * weighting
+
+                    #if weighting is not None:
+                    #    loss = loss * weighting
                     if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
                         loss = apply_masked_loss(loss, batch)
                     loss = loss.mean([1, 2, 3])
@@ -362,7 +363,7 @@ class NetworkTrainer:
                     loss = loss * loss_weights
 
                     # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                    loss = self.post_process_loss(loss, args, timesteps, noise_scheduler, False)
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
                     total_loss += loss
