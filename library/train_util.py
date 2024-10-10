@@ -4920,7 +4920,10 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
             value = ast.literal_eval(value)
 
             # TODO temp fix for warmup and first cycle steps pending UI changes
-            if (key == 'warmup_steps' or key == 'first_cycle_max_steps') and float(args.validation_split) > 0.0:
+            if key == 'first_cycle_max_steps' and float(args.validation_split) > 0.0:
+                value = math.ceil(num_training_steps / num_cycles)
+
+            if key == 'warmup_steps' and float(args.validation_split) > 0.0:
                 value = math.ceil(value * (1.0 - float(args.validation_split)))
 
             lr_scheduler_kwargs[key] = value
