@@ -171,8 +171,9 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
     return average_loss
 
 def calculate_val_loss(self, 
-                        epoch, 
                         global_step,
+                        epoch_step,
+                        train_dataloader,
                         val_loss_recorder,
                         val_dataloader,
                         cyclic_val_dataloader,
@@ -187,16 +188,16 @@ def calculate_val_loss(self,
                         weight_dtype, 
                         accelerator, 
                         args):
-    if global_step != 0:
+    if global_step != 0 and global_step < args.max_train_steps:
         if args.validation_split is None:
             return None, None, None
-        if args.validation_every_n_step is None:
-            # sample_every_n_steps は無視する
-            if epoch is None:
-                return None, None, None
         else:
-            if global_step % int(args.validation_every_n_step) != 0 or epoch is not None:  # steps is not divisible or end of epoch
-                return None, None, None
+            if args.validation_every_n_step is not None:
+                if global_step % int(args.validation_every_n_step) != 0:
+                    return None, None, None
+            else:
+                if epoch_step != len(train_dataloader) - 1:
+                    return None, None, None
         
     accelerator.print("Validating バリデーション処理...")
     total_loss = 0.0
@@ -760,7 +761,7 @@ def train(args):
     sdxl_train_util.sample_images(
         accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, [text_encoder1, text_encoder2], unet
     )
-    current_val_loss, average_val_loss, val_logs = calculate_val_loss(0, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+    current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
     if len(accelerator.trackers) > 0:
         # log empty object to commit the sample images to wandb
         accelerator.log({}, step=0)
@@ -920,7 +921,7 @@ def train(args):
                     unet,
                 )
 
-                current_val_loss, average_val_loss, val_logs = calculate_val_loss(0, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
 
                 # 指定ステップごとにモデルを保存
                 if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:

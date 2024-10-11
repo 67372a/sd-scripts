@@ -372,8 +372,9 @@ class NetworkTrainer:
         return average_loss
 
     def calculate_val_loss(self, 
-                           epoch, 
                            global_step,
+                           epoch_step,
+                           train_dataloader,
                            val_loss_recorder,
                            val_dataloader,
                            cyclic_val_dataloader,
@@ -390,17 +391,17 @@ class NetworkTrainer:
                            accelerator, 
                            args, 
                            train_text_encoder=True):
-        if global_step != 0:
+        if global_step != 0 and global_step < args.max_train_steps:
             if args.validation_split is None:
                 return None, None, None
-            if args.validation_every_n_step is None:
-                # sample_every_n_steps は無視する
-                if epoch is None:
-                    return None, None, None
             else:
-                if global_step % int(args.validation_every_n_step) != 0 or epoch is not None:  # steps is not divisible or end of epoch
-                    return None, None, None
-            
+                if args.validation_every_n_step is not None:
+                    if global_step % int(args.validation_every_n_step) != 0:
+                        return None, None, None
+                else:
+                    if epoch_step != len(train_dataloader) - 1:
+                        return None, None, None
+              
         accelerator.print("Validating バリデーション処理...")
         total_loss = 0.0
         with torch.no_grad():
@@ -1248,7 +1249,7 @@ class NetworkTrainer:
         # For --sample_at_first
         optimizer_eval_fn()
         self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(0, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
         optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1284,6 +1285,7 @@ class NetworkTrainer:
             if initial_step > 0:
                 skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
                 initial_step = 1
+
 
             for step, batch in enumerate(skipped_dataloader or train_dataloader):
                 current_step.value = global_step
@@ -1431,7 +1433,7 @@ class NetworkTrainer:
                         accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                     )
 
-                    current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(None, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                    current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
 
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
