@@ -407,7 +407,7 @@ class NetworkTrainer:
             validation_steps = min(int(args.max_validation_steps), len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
             for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
                 batch = next(cyclic_val_dataloader)
-                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
                 total_loss += loss.detach().item()
             current_val_loss = total_loss / validation_steps
             val_loss_recorder.add(epoch=0, step=global_step, loss=current_val_loss)   
@@ -577,6 +577,9 @@ class NetworkTrainer:
         if text_encoder_outputs_caching_strategy is not None:
             strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_outputs_caching_strategy)
         self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
+
+        if val_dataset_group is not None:
+            self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
 
         # prepare network
         net_kwargs = {}
@@ -1197,6 +1200,9 @@ class NetworkTrainer:
         
         del train_dataset_group
 
+        if val_dataset_group is not None:
+            del val_dataset_group
+
         # callback for step start
         if hasattr(accelerator.unwrap_model(network), "on_step_start"):
             on_step_start = accelerator.unwrap_model(network).on_step_start
@@ -1242,7 +1248,7 @@ class NetworkTrainer:
         # For --sample_at_first
         optimizer_eval_fn()
         self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(0, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(0, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
         optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1425,7 +1431,7 @@ class NetworkTrainer:
                         accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                     )
 
-                    current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(None, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                    current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(None, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
 
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
@@ -1489,7 +1495,7 @@ class NetworkTrainer:
 
                     if args.save_state:
                         train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-            current_val_loss, average_val_loss, logs = self.calculate_val_loss(epoch + 1, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+            current_val_loss, average_val_loss, logs = self.calculate_val_loss(epoch + 1, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
             
             
             self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)

@@ -455,11 +455,7 @@ def get_noisy_model_input_and_timesteps(
     bsz, _, h, w = latents.shape
     sigmas = None
 
-    if fixed_timesteps:
-        timesteps = fixed_timesteps
-        t = timesteps.view(-1, 1, 1, 1) / 1000.0 # assuming timesteps are already 0-1000
-        noisy_model_input = (1 - t) * latents + t * get_noise(args, latents, noise, timesteps, train)
-    else:
+    if fixed_timesteps is None:
         if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
             # Simple random t-based noise sampling
             if args.timestep_sampling == "sigmoid":
@@ -507,6 +503,11 @@ def get_noisy_model_input_and_timesteps(
             # Add noise according to flow matching.
             sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
             noisy_model_input = sigmas * get_noise(args, latents, noise, timesteps, train) + (1.0 - sigmas) * latents
+    else:
+        timesteps = fixed_timesteps
+        t = timesteps.view(-1, 1, 1, 1) / 1000.0 # assuming timesteps are already 0-1000
+        noisy_model_input = (1 - t) * latents + t * get_noise(args, latents, noise, timesteps, train)
+
 
     return noisy_model_input, timesteps, sigmas
 
