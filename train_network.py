@@ -1454,16 +1454,16 @@ class NetworkTrainer:
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
-                if val_logs:
-                    logs = {**val_logs, **logs}
-
                 if args.scale_weight_norms:
                     logs = {**max_mean_logs, **logs}
 
+                progress_bar.set_postfix(**logs)
+
+                if val_logs:
+                    logs = {**val_logs, **logs}
+
                 if args.max_grad_norm != 0.0 :
                     logs = {'Grad Norm': grad_norm, **logs}
-
-                progress_bar.set_postfix(**logs)
 
                 if len(accelerator.trackers) > 0:
                     logs = self.generate_step_logs(
@@ -1495,8 +1495,6 @@ class NetworkTrainer:
 
                     if args.save_state:
                         train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-            current_val_loss, average_val_loss, logs = self.calculate_val_loss(epoch + 1, global_step, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
-            
             
             self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             optimizer_train_fn()
