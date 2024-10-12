@@ -238,8 +238,8 @@ class ConfigSanitizer:
         "enable_bucket": bool,
         "max_bucket_reso": int,
         "min_bucket_reso": int,
-        "validation_seed": str,
-        "validation_split": str,        
+        #"validation_seed": str,
+        #"validation_split": str,        
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "network_multiplier": float,
         

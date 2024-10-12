@@ -1746,8 +1746,8 @@ class DreamBoothDataset(BaseDataset):
         assert resolution is not None, f"resolution is required / resolution（解像度）指定は必須です"
 
         self.is_train = is_train
-        self.validation_split = float(validation_split)
-        self.validation_seed = int(validation_seed)
+        self.validation_split = float(validation_split) if validation_split is not None else 0.0
+        self.validation_seed = int(validation_seed) if validation_seed is not None else None
         self.batch_size = batch_size
         self.size = min(self.width, self.height)  # 短いほう
         self.prior_loss_weight = prior_loss_weight
@@ -2261,8 +2261,8 @@ class ControlNetDataset(BaseDataset):
         self.num_train_images = self.dreambooth_dataset_delegate.num_train_images
         self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images        
         self.is_train = is_train
-        self.validation_split = validation_split
-        self.validation_seed = validation_seed 
+        self.validation_split = float(validation_split) if validation_split is not None else 0.0
+        self.validation_seed = int(validation_seed) if validation_seed is not None else None
 
         # assert all conditioning data exists
         missing_imgs = []
