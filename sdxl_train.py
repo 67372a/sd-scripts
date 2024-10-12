@@ -763,6 +763,8 @@ def train(args):
     sdxl_train_util.sample_images(
         accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, [text_encoder1, text_encoder2], unet
     )
+
+    current_val_loss, average_val_loss, val_logs = None, None, None
     if cyclic_val_dataloader is not None:
         current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
     if len(accelerator.trackers) > 0:
