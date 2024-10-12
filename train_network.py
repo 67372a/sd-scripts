@@ -814,6 +814,8 @@ class NetworkTrainer:
         if val_dataset_group is not None:
             val_dataloader = accelerator.prepare(val_dataloader)
             cyclic_val_dataloader = itertools.cycle(val_dataloader)
+        else:
+            val_dataloader, cyclic_val_dataloader = None, None
 
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required

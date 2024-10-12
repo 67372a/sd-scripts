@@ -642,6 +642,8 @@ def train(args):
     if val_dataset_group is not None:
         val_dataloader = accelerator.prepare(val_dataloader)
         cyclic_val_dataloader = itertools.cycle(val_dataloader)
+    else:
+        val_dataloader, cyclic_val_dataloader = None, None
 
     # TextEncoderの出力をキャッシュするときにはCPUへ移動する
     if args.cache_text_encoder_outputs:
