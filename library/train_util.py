@@ -4922,7 +4922,10 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
             # TODO temp fix for warmup and first cycle steps pending UI changes
             if key == 'first_cycle_max_steps' and float(args.validation_split) > 0.0:
                 value = math.ceil(num_training_steps / num_cycles)
-
+                num_cycles = 1
+            elif key == 'first_cycle_max_steps':
+                num_cycles = 1
+            
             if key == 'warmup_steps' and float(args.validation_split) > 0.0:
                 value = math.ceil(value * (1.0 - float(args.validation_split)))
 
