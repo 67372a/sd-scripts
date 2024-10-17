@@ -745,7 +745,7 @@ def train(args):
         val_noise_scheduler = DDPMScheduler(
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
         )
-        prepare_scheduler_for_custom_training(val_noise_scheduler, accelerator.device)
+        prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
     else:
         val_noise_scheduler = None
 
