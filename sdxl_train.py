@@ -156,7 +156,11 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
 
                     noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
 
-                    target = noise
+                    if args.v_parameterization:
+                        # v-parameterization training
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
 
                     loss = train_util.conditional_loss(
                         noise_pred.float(), target.float(), reduction="mean", loss_type="l2", huber_c=huber_c

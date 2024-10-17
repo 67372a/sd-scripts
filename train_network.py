@@ -225,7 +225,7 @@ class NetworkTrainer:
                 weight_dtype,
             )
 
-        if args.v_parameterization and train:
+        if args.v_parameterization:
             # v-parameterization training
             target = noise_scheduler.get_velocity(latents, noise, timesteps)
         else:
