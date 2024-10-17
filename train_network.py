@@ -171,13 +171,12 @@ class NetworkTrainer:
     def post_process_network(self, args, accelerator, network, text_encoders, unet):
         pass
 
-    def get_noise_scheduler(self, args: argparse.Namespace, device: torch.device, train=True) -> Any:
+    def get_noise_scheduler(self, args: argparse.Namespace, device: torch.device) -> Any:
         noise_scheduler = DDPMScheduler(
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
         )
         prepare_scheduler_for_custom_training(noise_scheduler, device)
-
-        if args.zero_terminal_snr and train:
+        if args.zero_terminal_snr:
             custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
         return noise_scheduler
 
@@ -1187,11 +1186,6 @@ class NetworkTrainer:
 
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
 
-        if val_dataset_group is not None:
-            val_noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
-        else:
-            val_noise_scheduler = None
-
         if accelerator.is_main_process:
             init_kwargs = {}
             if args.wandb_run_name:
@@ -1258,7 +1252,7 @@ class NetworkTrainer:
         optimizer_eval_fn()
         self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
         if cyclic_val_dataloader is not None:
-            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, val_noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
         optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1450,7 +1444,7 @@ class NetworkTrainer:
                     )
 
                     if cyclic_val_dataloader is not None:
-                        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, val_noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
 
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:

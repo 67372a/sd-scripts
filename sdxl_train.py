@@ -741,14 +741,6 @@ def train(args):
     if args.zero_terminal_snr:
         custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
-    if val_dataset_group is not None:
-        val_noise_scheduler = DDPMScheduler(
-            beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
-        )
-        prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
-    else:
-        val_noise_scheduler = None
-
     if accelerator.is_main_process:
         init_kwargs = {}
         if args.wandb_run_name:
@@ -768,7 +760,7 @@ def train(args):
 
     current_val_loss, average_val_loss, val_logs = None, None, None
     if cyclic_val_dataloader is not None:
-        current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, val_noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+        current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
     if len(accelerator.trackers) > 0:
         # log empty object to commit the sample images to wandb
         accelerator.log({}, step=0)
@@ -931,7 +923,7 @@ def train(args):
                 )
 
                 if cyclic_val_dataloader is not None:
-                    current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, val_noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                    current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
 
                 # 指定ステップごとにモデルを保存
                 if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
