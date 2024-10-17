@@ -1188,7 +1188,7 @@ class NetworkTrainer:
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
 
         if val_dataset_group is not None:
-            val_noise_scheduler = self.get_noise_scheduler(args, accelerator.device, False)
+            val_noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
         else:
             val_noise_scheduler = None
 
