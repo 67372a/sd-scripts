@@ -5805,7 +5805,7 @@ def save_sd_model_on_train_end_common(
 def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device, fixed_timesteps=None, train=True):
 
     if fixed_timesteps is None:
-        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
+        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=device)
     else:
         timesteps = fixed_timesteps
 
