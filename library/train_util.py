@@ -5016,6 +5016,11 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     num_decay_steps: Optional[int] = (
         int(args.lr_decay_steps * num_training_steps) if isinstance(args.lr_decay_steps, float) else args.lr_decay_steps
     )
+
+    # TODO add inputs to UI to support setting decay steps
+    if name == SchedulerType.WARMUP_STABLE_DECAY and (num_decay_steps is None or num_decay_steps == 0):
+        num_decay_steps = num_warmup_steps
+
     num_stable_steps = num_training_steps - num_warmup_steps - num_decay_steps
     num_cycles = args.lr_scheduler_num_cycles
     power = args.lr_scheduler_power
@@ -5058,6 +5063,8 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         lr_scheduler_class = getattr(lr_scheduler_module, lr_scheduler_type)
         lr_scheduler = lr_scheduler_class(optimizer, **lr_scheduler_kwargs)
         return wrap_check_needless_num_warmup_steps(lr_scheduler)
+    else:
+        logger.info(f"use {name} | {lr_scheduler_kwargs} as lr_scheduler")
 
     if name.startswith("adafactor"):
         assert (
@@ -5126,6 +5133,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         )
 
     # All other schedulers require `num_decay_steps`
+
     if num_decay_steps is None:
         raise ValueError(f"{name} requires `num_decay_steps`, please provide that argument.")
     if name == SchedulerType.WARMUP_STABLE_DECAY:
@@ -5134,8 +5142,9 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
             num_warmup_steps=num_warmup_steps,
             num_stable_steps=num_stable_steps,
             num_decay_steps=num_decay_steps,
-            num_cycles=num_cycles / 2,
+            num_cycles=num_cycles / 2.0,
             min_lr_ratio=min_lr_ratio if min_lr_ratio is not None else 0.0,
+            last_epoch=-1,
             **lr_scheduler_kwargs,
         )
 
