@@ -5004,7 +5004,7 @@ float_pattern = re.compile(r'''^[+-]?(
 int_pattern = re.compile(r'^[+-]?\d+$')
 
 def parse_string_to_type(s):
-    if s is None:
+    if s is not None:
         if isinstance(s, float) or isinstance(s, int):
             return s
         elif float_pattern.match(s):
@@ -5013,7 +5013,8 @@ def parse_string_to_type(s):
             return int(s)
         else:
             return s
-    return None
+    else:
+        return None
 
 # Modified version of get_scheduler() function from diffusers.optimizer.get_scheduler
 # Add some checking and features to the original function.
@@ -5033,7 +5034,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         int(args.lr_warmup_steps * num_training_steps) if isinstance(args.lr_warmup_steps, float) else args.lr_warmup_steps
     )
 
-    temp_lr_decay_steps = parse_string_to_type(args.lr_decay_steps) if args.lr_decay_steps is not None else args.lr_decay_steps
+    temp_lr_decay_steps = parse_string_to_type(args.lr_decay_steps) if args.lr_decay_steps is not None else args.lr_decay_steps or 0
 
     num_decay_steps: Optional[int] = (
         int(temp_lr_decay_steps * num_training_steps) if isinstance(temp_lr_decay_steps, float) else temp_lr_decay_steps
