@@ -5013,6 +5013,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     num_warmup_steps: Optional[int] = (
         int(args.lr_warmup_steps * num_training_steps) if isinstance(args.lr_warmup_steps, float) else args.lr_warmup_steps
     )
+
     num_decay_steps: Optional[int] = (
         int(args.lr_decay_steps * num_training_steps) if isinstance(args.lr_decay_steps, float) else args.lr_decay_steps
     )
@@ -5144,7 +5145,6 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
             num_decay_steps=num_decay_steps,
             num_cycles=num_cycles / 2.0,
             min_lr_ratio=min_lr_ratio if min_lr_ratio is not None else 0.0,
-            last_epoch=-1,
             **lr_scheduler_kwargs,
         )
 
@@ -5823,7 +5823,8 @@ def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler,
             alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
             huber_c = torch.exp(-alpha * timesteps)
         elif args.huber_schedule == "snr":
-            alphas_cumprod = torch.index_select(noise_scheduler.alphas_cumprod, 0, timesteps)
+            alphas_cumprod = noise_scheduler.alphas_cumprod.to(device)
+            alphas_cumprod = torch.index_select(alphas_cumprod, 0, timesteps)
             sigmas = ((1.0 - alphas_cumprod) / alphas_cumprod) ** 0.5
             huber_c = (1 - args.huber_c) / (1 + sigmas) ** 2 + args.huber_c
         elif args.huber_schedule == "constant":
