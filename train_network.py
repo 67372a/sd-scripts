@@ -65,6 +65,7 @@ class NetworkTrainer:
         mean_norm=None,
         maximum_norm=None,
         grad_norm=None,
+        grad_norm_clipped=None,
         current_val_loss=None,
         average_val_loss=None,
     ):
@@ -72,6 +73,7 @@ class NetworkTrainer:
 
         if grad_norm is not None:
             logs["train/grad_norm"] = grad_norm
+            logs["train/grad_norm_clipped"] = grad_norm_clipped
 
         if keys_scaled is not None:
             logs["max_norm/keys_scaled"] = keys_scaled
@@ -1270,6 +1272,7 @@ class NetworkTrainer:
             text_encoder = None
 
         grad_norm = 0.0
+        grad_norm_clipped = 0.0
         current_val_loss, average_val_loss, val_logs = None, None, None
 
         # For --sample_at_first
@@ -1420,8 +1423,10 @@ class NetworkTrainer:
                         params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                         if args.max_grad_norm != 0.0:
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
+                            grad_norm_clipped = min(grad_norm, args.max_grad_norm)
                         else: 
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
+                            grad_norm_clipped = grad_norm
                             
                     optimizer.step()
                     lr_scheduler.step()
@@ -1491,11 +1496,11 @@ class NetworkTrainer:
                     logs = {**val_logs, **logs}
 
                 if args.max_grad_norm != 0.0 :
-                    logs = {'Grad Norm': grad_norm, **logs}
+                    logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
 
                 if len(accelerator.trackers) > 0:
                     logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, current_val_loss, average_val_loss
+                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss
                     )
                     accelerator.log(logs, step=global_step)
                                         
