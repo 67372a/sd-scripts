@@ -18,8 +18,9 @@ Oct 19, 2024:
   - Define a Dataset subset for the regularization image (`is_reg = true`) with `.toml`. Add `custom_attributes.diff_output_preservation = true`.
     - See [dataset configuration](docs/config_README-en.md) for the regularization dataset.
   - Specify "number of training images x number of repeats >= number of regularization images x number of repeats".
-  - Specify a large value for `--prior_loss_weight` option (not dataset config). The appropriate value is unknown, but try around 10-100. Note that the default is 1.0.
-  - You may want to start with 2/3 to 3/4 of the loss value when DOP is not applied. If it is 1/2, DOP may not be working.
+  - The weights of DOP is specified by `--prior_loss_weight` option (not dataset config). 
+  - The appropriate value is still unknown. For FLUX, according to the comments in the [PR](https://github.com/kohya-ss/sd-scripts/pull/1710), the value may be 1 (thanks to dxqbYD!). For SDXL, a larger value may be needed (10-100 may be good starting points).
+  - It may be good to adjust the value so that the loss is about half to three-quarters of the loss when DOP is not applied.
 ```
 [[datasets.subsets]]
 image_dir = "path/to/image/dir"
@@ -27,6 +28,7 @@ num_repeats = 1
 is_reg = true
 custom_attributes.diff_output_preservation = true # Add this
 ```
+
 
 Oct 13, 2024:
 
@@ -776,6 +778,9 @@ The majority of scripts is licensed under ASL 2.0 (including codes from Diffuser
 - __important__ The dependent libraries are updated. Please see [Upgrade](#upgrade) and update the libraries.
   - bitsandbytes, transformers, accelerate and huggingface_hub are updated. 
   - If you encounter any issues, please report them.
+
+- Fixed a bug where the loss weight was incorrect when `--debiased_estimation_loss` was specified with `--v_parameterization`. PR [#1715](https://github.com/kohya-ss/sd-scripts/pull/1715) Thanks to catboxanon! See [the PR](https://github.com/kohya-ss/sd-scripts/pull/1715) for details.
+  - Removed the warning when `--v_parameterization` is specified in SDXL and SD1.5. PR [#1717](https://github.com/kohya-ss/sd-scripts/pull/1717)
 
 - There was a bug where the min_bucket_reso/max_bucket_reso in the dataset configuration did not create the correct resolution bucket if it was not divisible by bucket_reso_steps. These values are now warned and automatically rounded to a divisible value. Thanks to Maru-mee for raising the issue. Related PR [#1632](https://github.com/kohya-ss/sd-scripts/pull/1632)
 
