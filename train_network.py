@@ -142,6 +142,7 @@ class NetworkTrainer:
     def get_models_for_text_encoding(self, args, accelerator, text_encoders):
         """
         Returns a list of models that will be used for text encoding. SDXL uses wrapped and unwrapped models.
+        FLUX.1 and SD3 may cache some outputs of the text encoder, so return the models that will be used for encoding (not cached).
         """
         return text_encoders
 
@@ -285,6 +286,9 @@ class NetworkTrainer:
 
     def prepare_text_encoder_fp8(self, index, text_encoder, te_weight_dtype, weight_dtype):
         text_encoder.text_model.embeddings.to(dtype=weight_dtype)
+
+    def on_step_start(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype):
+        pass
 
     # endregion
 
@@ -786,6 +790,7 @@ class NetworkTrainer:
             # unet.to(accelerator.device)  # this makes faster `to(dtype)` below, but consumes 23 GB VRAM
             # unet.to(dtype=unet_weight_dtype)  # without moving to gpu, this takes a lot of time and main memory
 
+            logger.info(f"set U-Net weight dtype to {unet_weight_dtype}, device to {accelerator.device}")
             unet.to(accelerator.device, dtype=unet_weight_dtype)  # this seems to be safer than above
 
         unet.requires_grad_(False)
@@ -1234,9 +1239,9 @@ class NetworkTrainer:
 
         # callback for step start
         if hasattr(accelerator.unwrap_model(network), "on_step_start"):
-            on_step_start = accelerator.unwrap_model(network).on_step_start
+            on_step_start_for_network = accelerator.unwrap_model(network).on_step_start
         else:
-            on_step_start = lambda *args, **kwargs: None
+            on_step_start_for_network = lambda *args, **kwargs: None
 
         # function for saving/removing
         def save_model(ckpt_name, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
@@ -1324,7 +1329,11 @@ class NetworkTrainer:
                     continue
 
                 with accelerator.accumulate(training_model):
-                    on_step_start(text_encoder, unet)
+                    on_step_start_for_network(text_encoder, unet)
+
+                    # temporary, for batch processing
+                    self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
+
                     if "latents" in batch and batch["latents"] is not None:
                         latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                     else:
@@ -1355,7 +1364,9 @@ class NetworkTrainer:
                     text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
                     if text_encoder_outputs_list is not None:
                         text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
+
                     if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
+                        # TODO this does not work if 'some text_encoders are trained' and 'some are not and not cached'
                         with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
                             # Get the text embedding for conditioning
                             if args.weighted_captions:
