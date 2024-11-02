@@ -1520,7 +1520,7 @@ class NetworkTrainer:
 
             if len(accelerator.trackers) > 0:
                 logs = {"loss/epoch": loss_recorder.moving_average}
-                accelerator.log(logs, step=epoch + 1)
+                accelerator.log(logs, step=global_step)
                             
             accelerator.wait_for_everyone()
 
