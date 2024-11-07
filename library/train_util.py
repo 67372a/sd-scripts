@@ -4869,7 +4869,18 @@ def get_optimizer(args, trainable_params):
             optimizer_class = sf.SGDScheduleFree
             logger.info(f"use SGDScheduleFree optimizer | {optimizer_kwargs}")
         else:
-            raise ValueError(f"Unknown optimizer type: {optimizer_type}")
+            # 任意のoptimizerを使う
+            case_sensitive_optimizer_type = args.optimizer_type  # not lower
+            logger.info(f"use {case_sensitive_optimizer_type} | {optimizer_kwargs}")
+
+            if "." not in case_sensitive_optimizer_type:  # from torch.optim
+                optimizer_module = torch.optim
+            else:  # from other library
+                values = case_sensitive_optimizer_type.split(".")
+                optimizer_module = importlib.import_module(".".join(values[:-1]))
+                case_sensitive_optimizer_type = values[-1]
+
+            optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
         # make optimizer as train mode: we don't need to call train again, because eval will not be called in training loop
         optimizer.train()
