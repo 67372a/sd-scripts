@@ -258,7 +258,7 @@ class NetworkTrainer:
                 network.set_multiplier(1.0)  # may be overwritten by "network_multipliers" in the next step
                 target[diff_output_pr_indices] = noise_pred_prior.to(target.dtype)
 
-        return noise_pred, target, timesteps, huber_c, None
+        return noise_pred, target, timesteps, huber_c, None, noisy_latents
 
     def post_process_loss(self, loss, args, timesteps, noise_scheduler, train=True):
         if args.min_snr_gamma and train:
@@ -364,7 +364,7 @@ class NetworkTrainer:
                     timesteps = torch.full((batch_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
 
                     # sample noise, call unet, get target
-                    noise_pred, target, timesteps, huber_c, weighting = self.get_noise_pred_and_target(
+                    noise_pred, target, timesteps, huber_c, weighting, noisy_latents = self.get_noise_pred_and_target(
                         args,
                         accelerator,
                         noise_scheduler,
@@ -1278,7 +1278,9 @@ class NetworkTrainer:
 
         grad_norm = 0.0
         grad_norm_clipped = 0.0
-        current_val_loss, average_val_loss, val_logs = None, None, None
+        current_val_loss, average_val_loss, val_logs = None, None, {}
+        keys_scaled, mean_norm, maximum_norm = None, None, None
+        max_mean_logs = {}
 
         # For --sample_at_first
         optimizer_eval_fn()
@@ -1308,59 +1310,520 @@ class NetworkTrainer:
             
         clean_memory_on_device(accelerator.device)
 
-        for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
-            current_epoch.value = epoch + 1
+        # Define the number of steps to accumulate gradients
+        iter_size = args.gradient_accumulation_steps
+        accumulation_counter = 0
 
-            metadata["ss_epoch"] = str(epoch + 1)
+        # Initialize lists to store necessary data for recomputing the loss
+        batch_data_list = []
 
-            accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
+        if train_util.is_sam_optimizer(optimizer, args):
+            for epoch in range(epoch_to_start, num_train_epochs):
+                accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+                current_epoch.value = epoch + 1
 
-            skipped_dataloader = None
-            if initial_step > 0:
-                skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
-                initial_step = 1
+                metadata["ss_epoch"] = str(epoch + 1)
 
+                accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
 
-            for step, batch in enumerate(skipped_dataloader or train_dataloader):
-                current_step.value = global_step
+                skipped_dataloader = None
                 if initial_step > 0:
-                    initial_step -= 1
-                    continue
+                    skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
+                    initial_step = 1
 
-                with accelerator.accumulate(training_model):
-                    on_step_start_for_network(text_encoder, unet)
+                for step, batch in enumerate(skipped_dataloader or train_dataloader):
+                    current_step.value = global_step
+                    if initial_step > 0:
+                        initial_step -= 1
+                        continue
 
-                    # temporary, for batch processing
-                    self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
+                    # Determine whether we should synchronize gradients
+                    sync_gradients = (accumulation_counter + 1) % iter_size == 0 or (step + 1 == len(skipped_dataloader or train_dataloader))
 
-                    if "latents" in batch and batch["latents"] is not None:
-                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                    effective_batch_size = accumulation_counter if sync_gradients else iter_size
+                    loss_scaling = 1.0 / effective_batch_size
+
+                    # Prevent gradient synchronization during accumulation steps in distributed settings
+                    if not sync_gradients and accelerator.num_processes > 1:
+                        # Accumulate gradients without synchronizing
+                        with accelerator.no_sync(training_model):
+                            # Perform forward and backward passes
+                            # Processing batch and computing loss
+
+                            # Call any required functions at the start of the step
+                            on_step_start_for_network(text_encoder, unet)
+
+                            # Temporary, for batch processing
+                            self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
+
+                            # Prepare latents
+                            if "latents" in batch and batch["latents"] is not None:
+                                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                            else:
+                                with torch.no_grad():
+                                    # Convert images to latents
+                                    latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                                    latents = latents.to(dtype=weight_dtype)
+                                    # Replace NaNs if any
+                                    if torch.any(torch.isnan(latents)):
+                                        accelerator.print("NaN found in latents, replacing with zeros")
+                                        latents = torch.nan_to_num(latents, 0, out=latents)
+
+                            latents = self.shift_scale_latents(args, latents)
+
+                            # Handle network multipliers
+                            if network_has_multiplier:
+                                multipliers = batch["network_multipliers"]
+                                if torch.all(multipliers == multipliers[0]):
+                                    multipliers = multipliers[0].item()
+                                else:
+                                    raise NotImplementedError("Multipliers for each sample are not supported yet")
+                                accelerator.unwrap_model(network).set_multiplier(multipliers)
+
+                            # Prepare text encoder conditions
+                            text_encoder_conds = batch.get("text_encoder_outputs_list", [])
+                            if not text_encoder_conds or text_encoder_conds[0] is None or train_text_encoder:
+                                with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                                    # Get the text embeddings
+                                    if args.weighted_captions:
+                                        input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
+                                            tokenize_strategy,
+                                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                                            input_ids_list,
+                                            weights_list,
+                                        )
+                                    else:
+                                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
+                                            tokenize_strategy,
+                                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                                            input_ids,
+                                        )
+                                    if args.full_fp16:
+                                        encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+                                # Update text encoder conditions
+                                if not text_encoder_conds:
+                                    text_encoder_conds = encoded_text_encoder_conds
+                                else:
+                                    for i in range(len(encoded_text_encoder_conds)):
+                                        if encoded_text_encoder_conds[i] is not None:
+                                            text_encoder_conds[i] = encoded_text_encoder_conds[i]
+
+                            # Get noise prediction and target
+                            noise_pred, target, timesteps, huber_c, weighting, noisy_latents = self.get_noise_pred_and_target(
+                                args,
+                                accelerator,
+                                noise_scheduler,
+                                latents,
+                                batch,
+                                text_encoder_conds,
+                                unet,
+                                network,
+                                weight_dtype,
+                                train_unet,
+                            )
+
+                            # Compute loss
+                            loss = train_util.conditional_loss(
+                                noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                            )
+                            if weighting is not None:
+                                loss = loss * weighting
+                            if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                                loss = apply_masked_loss(loss, batch)
+                            loss = loss.mean(dim=[1, 2, 3])  # Mean over dimensions
+
+                            loss_weights = batch["loss_weights"]  # Sample-wise weights
+                            loss = loss * loss_weights
+
+                            # Post-process loss
+                            loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                            loss = loss.mean()  # Mean over batch
+
+                            # Divide loss by iter_size to average over accumulated steps
+                            loss = loss * loss_scaling
+
+                            # Backward pass
+                            accelerator.backward(loss)
+
+                            # Collect necessary data for recomputation during second step
+                            batch_data_list.append({
+                                'batch': batch,
+                                'text_encoder_conds': [cond.detach().clone() for cond in text_encoder_conds],
+                                'timesteps': timesteps.detach().clone(),
+                                'target': target.detach().clone(),
+                                'huber_c': huber_c,
+                                'weighting': weighting.detach().clone() if weighting is not None else None,
+                                'noisy_latents': noisy_latents.detach().clone(),
+                            })
+
+                        accumulation_counter += 1
                     else:
-                        with torch.no_grad():
-                            # latentに変換
-                            latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
-                            latents = latents.to(dtype=weight_dtype)
+                        # Synchronize gradients and perform optimizer steps
+                        # Perform forward and backward passes
+                        # Processing batch and computing loss
 
-                            # NaNが含まれていれば警告を表示し0に置き換える
-                            if torch.any(torch.isnan(latents)):
-                                accelerator.print("NaN found in latents, replacing with zeros")
-                                latents = torch.nan_to_num(latents, 0, out=latents)
+                        # Call any required functions at the start of the step
+                        on_step_start_for_network(text_encoder, unet)
 
-                    latents = self.shift_scale_latents(args, latents)
+                        # Temporary, for batch processing
+                        self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
 
-                    # get multiplier for each sample
-                    if network_has_multiplier:
-                        multipliers = batch["network_multipliers"]
-                        # if all multipliers are same, use single multiplier
-                        if torch.all(multipliers == multipliers[0]):
-                            multipliers = multipliers[0].item()
+                        # Prepare latents
+                        if "latents" in batch and batch["latents"] is not None:
+                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                         else:
-                            raise NotImplementedError("multipliers for each sample is not supported yet")
-                        # print(f"set multiplier: {multipliers}")
-                        accelerator.unwrap_model(network).set_multiplier(multipliers)
+                            with torch.no_grad():
+                                # Convert images to latents
+                                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                                latents = latents.to(dtype=weight_dtype)
+                                # Replace NaNs if any
+                                if torch.any(torch.isnan(latents)):
+                                    accelerator.print("NaN found in latents, replacing with zeros")
+                                    latents = torch.nan_to_num(latents, 0, out=latents)
 
-                    def loss_function():
+                        latents = self.shift_scale_latents(args, latents)
+
+                        # Handle network multipliers
+                        if network_has_multiplier:
+                            multipliers = batch["network_multipliers"]
+                            if torch.all(multipliers == multipliers[0]):
+                                multipliers = multipliers[0].item()
+                            else:
+                                raise NotImplementedError("Multipliers for each sample are not supported yet")
+                            accelerator.unwrap_model(network).set_multiplier(multipliers)
+
+                        # Prepare text encoder conditions
+                        text_encoder_conds = batch.get("text_encoder_outputs_list", [])
+                        if not text_encoder_conds or text_encoder_conds[0] is None or train_text_encoder:
+                            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                                # Get the text embeddings
+                                if args.weighted_captions:
+                                    input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                                    encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
+                                        tokenize_strategy,
+                                        self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                                        input_ids_list,
+                                        weights_list,
+                                    )
+                                else:
+                                    input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                                    encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
+                                        tokenize_strategy,
+                                        self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                                        input_ids,
+                                    )
+                                if args.full_fp16:
+                                    encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+                            # Update text encoder conditions
+                            if not text_encoder_conds:
+                                text_encoder_conds = encoded_text_encoder_conds
+                            else:
+                                for i in range(len(encoded_text_encoder_conds)):
+                                    if encoded_text_encoder_conds[i] is not None:
+                                        text_encoder_conds[i] = encoded_text_encoder_conds[i]
+
+                        # Get noise prediction and target
+                        noise_pred, target, timesteps, huber_c, weighting, noisy_latents = self.get_noise_pred_and_target(
+                            args,
+                            accelerator,
+                            noise_scheduler,
+                            latents,
+                            batch,
+                            text_encoder_conds,
+                            unet,
+                            network,
+                            weight_dtype,
+                            train_unet,
+                        )
+
+                        # Compute loss
+                        loss = train_util.conditional_loss(
+                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                        )
+                        if weighting is not None:
+                            loss = loss * weighting
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean(dim=[1, 2, 3])  # Mean over dimensions
+
+                        loss_weights = batch["loss_weights"]  # Sample-wise weights
+                        loss = loss * loss_weights
+
+                        # Post-process loss
+                        loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                        loss = loss.mean()  # Mean over batch
+
+                        # Divide loss by iter_size to average over accumulated steps
+                        loss = loss * loss_scaling
+
+                        # Backward pass
+                        accelerator.backward(loss)
+
+                        # Collect necessary data for recomputation during second step
+                        batch_data_list.append({
+                            'batch': batch,
+                            'text_encoder_conds': [cond.detach().clone() for cond in text_encoder_conds],
+                            'timesteps': timesteps.detach().clone(),
+                            'target': target.detach().clone(),
+                            'huber_c': huber_c,
+                            'weighting': weighting.detach().clone() if weighting is not None else None,
+                            'noisy_latents': noisy_latents.detach().clone(),
+                        })
+
+                        accumulation_counter += 1
+
+                    if sync_gradients:
+                        def closure():
+                            # Initialize total loss
+                            total_loss = 0.0
+
+                            # Second pass over the accumulated batches for the second step
+                            for saved_data in batch_data_list:
+                                # Unpack saved data
+                                batch = saved_data['batch']
+                                text_encoder_conds = saved_data['text_encoder_conds']
+                                timesteps = saved_data['timesteps']
+                                target = saved_data['target']
+                                huber_c = saved_data['huber_c']
+                                weighting = saved_data['weighting']
+                                noisy_latents = saved_data['noisy_latents']
+
+                                for x in noisy_latents:
+                                    x.requires_grad_(True)
+                                for t in text_encoder_conds:
+                                    t.requires_grad_(True)
+
+                                # Predict the noise residual
+                                with accelerator.autocast():
+                                    noise_pred = self.call_unet(
+                                        args,
+                                        accelerator,
+                                        unet,
+                                        noisy_latents.requires_grad_(True),
+                                        timesteps,
+                                        text_encoder_conds,
+                                        batch,
+                                        weight_dtype,
+                                    )
+
+                                # Recompute loss
+                                loss = train_util.conditional_loss(
+                                    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                                )
+                                if weighting is not None:
+                                    loss = loss * weighting
+                                if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                                    loss = apply_masked_loss(loss, batch)
+                                loss = loss.mean([1, 2, 3])
+
+                                loss_weights = batch["loss_weights"]  # Sample-wise weights
+
+                                loss = loss * loss_weights
+
+                                # Post-process loss if needed
+                                loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                                loss = loss.mean()  # Average over batch
+
+                                # Divide loss by iter_size to average over accumulated steps
+                                loss = loss * loss_scaling
+
+                                # Accumulate total loss
+                                total_loss += loss.detach()
+
+                                # Backward pass
+                                accelerator.backward(loss)
+
+                            self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                            if args.max_grad_norm != 0.0:
+                                accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
+
+                            return total_loss / len(batch_data_list)
+
+                        self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                        params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                        if args.max_grad_norm != 0.0:
+                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
+                            grad_norm_clipped = min(grad_norm, args.max_grad_norm)
+                        else: 
+                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
+                            grad_norm_clipped = grad_norm
+
+                        # Perform step
+                        optimizer.step(closure)
+
+                        # Zero gradients
+                        optimizer.zero_grad()
+
+                        # Update learning rate
+                        lr_scheduler.step()
+
+                        # Clear the list of saved batches
+                        batch_data_list = []
+
+                        # Reset accumulation counter
+                        accumulation_counter = 0
+
+                        if args.scale_weight_norms:
+                            keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
+                                args.scale_weight_norms, accelerator.device
+                            )
+
+                            if isinstance(keys_scaled, torch.Tensor):
+                                #Unpack
+                                keys_scaled = keys_scaled.item()
+
+                            if isinstance(mean_norm, torch.Tensor):
+                                #Unpack
+                                mean_norm = mean_norm.item()
+
+                            if isinstance(maximum_norm, torch.Tensor):
+                                #Unpack
+                                maximum_norm = maximum_norm.item()
+
+                            max_mean_logs = {"Keys Scaled": keys_scaled, "Avg key norm": mean_norm}
+                        else:
+                            keys_scaled, mean_norm, maximum_norm = None, None, None
+
+
+                        progress_bar.update(1)
+                        global_step += 1
+
+                        optimizer_eval_fn()
+                        self.sample_images(
+                            accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+                        )
+
+                        if cyclic_val_dataloader is not None:
+                            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+
+                        # 指定ステップごとにモデルを保存
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+
+                                if args.save_state:
+                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                                remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                    remove_model(remove_ckpt_name)
+                        optimizer_train_fn()
+
+                    current_loss = loss.detach().item() / loss_scaling  # Multiply back since we divided earlier
+                    loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    avr_loss: float = loss_recorder.moving_average
+                    logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+
+                    if args.scale_weight_norms:
+                        logs = {**max_mean_logs, **logs}
+
+                    progress_bar.set_postfix(**logs)
+
+                    if val_logs:
+                        logs = {**val_logs, **logs}
+
+                    if args.max_grad_norm != 0.0 :
+                        logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
+
+                    if len(accelerator.trackers) > 0:
+                        logs = self.generate_step_logs(
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss
+                        )
+                        accelerator.log(logs, step=global_step)
+                                            
+                    if global_step >= args.max_train_steps:
+                        break
+
+                if len(accelerator.trackers) > 0:
+                    logs = {"loss/epoch": loss_recorder.moving_average}
+                    accelerator.log(logs, step=global_step)
+                            
+                accelerator.wait_for_everyone()
+
+                # 指定エポックごとにモデルを保存
+                optimizer_eval_fn()
+                if args.save_every_n_epochs is not None:
+                    saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                    if is_main_process and saving:
+                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+
+                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                        if remove_epoch_no is not None:
+                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                            remove_model(remove_ckpt_name)
+
+                        if args.save_state:
+                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                
+                self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+                optimizer_train_fn()
+
+                # end of epoch
+
+        else:
+            #Normal training loop
+            for epoch in range(epoch_to_start, num_train_epochs):
+                accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+                current_epoch.value = epoch + 1
+
+                metadata["ss_epoch"] = str(epoch + 1)
+
+                accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
+
+                skipped_dataloader = None
+                if initial_step > 0:
+                    skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
+                    initial_step = 1
+
+
+                for step, batch in enumerate(skipped_dataloader or train_dataloader):
+                    current_step.value = global_step
+                    if initial_step > 0:
+                        initial_step -= 1
+                        continue
+
+                    with accelerator.accumulate(training_model):
+                        on_step_start_for_network(text_encoder, unet)
+
+                        # temporary, for batch processing
+                        self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
+
+                        if "latents" in batch and batch["latents"] is not None:
+                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                        else:
+                            with torch.no_grad():
+                                # latentに変換
+                                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                                latents = latents.to(dtype=weight_dtype)
+
+                                # NaNが含まれていれば警告を表示し0に置き換える
+                                if torch.any(torch.isnan(latents)):
+                                    accelerator.print("NaN found in latents, replacing with zeros")
+                                    latents = torch.nan_to_num(latents, 0, out=latents)
+
+                        latents = self.shift_scale_latents(args, latents)
+
+                        # get multiplier for each sample
+                        if network_has_multiplier:
+                            multipliers = batch["network_multipliers"]
+                            # if all multipliers are same, use single multiplier
+                            if torch.all(multipliers == multipliers[0]):
+                                multipliers = multipliers[0].item()
+                            else:
+                                raise NotImplementedError("multipliers for each sample is not supported yet")
+                            # print(f"set multiplier: {multipliers}")
+                            accelerator.unwrap_model(network).set_multiplier(multipliers)
+
                         text_encoder_conds = []
                         text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
                         if text_encoder_outputs_list is not None:
@@ -1398,7 +1861,7 @@ class NetworkTrainer:
                                         text_encoder_conds[i] = encoded_text_encoder_conds[i]
 
                         # sample noise, call unet, get target
-                        noise_pred, target, timesteps, huber_c, weighting = self.get_noise_pred_and_target(
+                        noise_pred, target, timesteps, huber_c, weighting, noisy_latents = self.get_noise_pred_and_target(
                             args,
                             accelerator,
                             noise_scheduler,
@@ -1427,141 +1890,124 @@ class NetworkTrainer:
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
                         loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-
-                        return loss
-                
-                    loss = loss_function()
-
-                    if train_util.is_sam_optimizer(optimizer, args):  
-                        with accelerator.no_sync(network):
-                            accelerator.backward(loss)
-                    else:
+                        
                         accelerator.backward(loss)
 
-                    if accelerator.sync_gradients:
-                        self.all_reduce_network(accelerator, network)  # sync DDP grad manually
-                        params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                        if args.max_grad_norm != 0.0:
-                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
-                            grad_norm_clipped = min(grad_norm, args.max_grad_norm)
-                        else: 
-                            grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
-                            grad_norm_clipped = grad_norm
-                            
-                    if train_util.is_sam_optimizer(optimizer, args):
-                        def closure():
-                            closure_loss = loss_function()
-                            accelerator.backward(closure_loss)
-                            return closure_loss
-                        
-                        optimizer.step(closure)
-                    else:
+                        if accelerator.sync_gradients:
+                            self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                            if args.max_grad_norm != 0.0:
+                                grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
+                                grad_norm_clipped = min(grad_norm, args.max_grad_norm)
+                            else: 
+                                grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
+                                grad_norm_clipped = grad_norm
+                                
                         optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
 
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    if args.scale_weight_norms:
+                        keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
+                            args.scale_weight_norms, accelerator.device
+                        )
 
-                if args.scale_weight_norms:
-                    keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
-                        args.scale_weight_norms, accelerator.device
-                    )
+                        if isinstance(keys_scaled, torch.Tensor):
+                            #Unpack
+                            keys_scaled = keys_scaled.item()
 
-                    if isinstance(keys_scaled, torch.Tensor):
-                        #Unpack
-                        keys_scaled = keys_scaled.item()
+                        if isinstance(mean_norm, torch.Tensor):
+                            #Unpack
+                            mean_norm = mean_norm.item()
 
-                    if isinstance(mean_norm, torch.Tensor):
-                        #Unpack
-                        mean_norm = mean_norm.item()
+                        if isinstance(maximum_norm, torch.Tensor):
+                            #Unpack
+                            maximum_norm = maximum_norm.item()
 
-                    if isinstance(maximum_norm, torch.Tensor):
-                        #Unpack
-                        maximum_norm = maximum_norm.item()
+                        max_mean_logs = {"Keys Scaled": keys_scaled, "Avg key norm": mean_norm}
+                    else:
+                        keys_scaled, mean_norm, maximum_norm = None, None, None
 
-                    max_mean_logs = {"Keys Scaled": keys_scaled, "Avg key norm": mean_norm}
-                else:
-                    keys_scaled, mean_norm, maximum_norm = None, None, None
+                    # Checks if the accelerator has performed an optimization step behind the scenes
+                    if accelerator.sync_gradients:
+                        progress_bar.update(1)
+                        global_step += 1
 
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if accelerator.sync_gradients:
-                    progress_bar.update(1)
-                    global_step += 1
+                        optimizer_eval_fn()
+                        self.sample_images(
+                            accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+                        )
 
-                    optimizer_eval_fn()
-                    self.sample_images(
-                        accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
-                    )
+                        if cyclic_val_dataloader is not None:
+                            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
 
-                    if cyclic_val_dataloader is not None:
-                        current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                        # 指定ステップごとにモデルを保存
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
-                    # 指定ステップごとにモデルを保存
-                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                        accelerator.wait_for_everyone()
-                        if accelerator.is_main_process:
-                            ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                                if args.save_state:
+                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
 
-                            if args.save_state:
-                                train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+                                remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                    remove_model(remove_ckpt_name)
+                        optimizer_train_fn()
 
-                            remove_step_no = train_util.get_remove_step_no(args, global_step)
-                            if remove_step_no is not None:
-                                remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                remove_model(remove_ckpt_name)
-                    optimizer_train_fn()
+                    current_loss = loss.detach().item()
+                    loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    avr_loss: float = loss_recorder.moving_average
+                    logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
-                current_loss = loss.detach().item()
-                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-                avr_loss: float = loss_recorder.moving_average
-                logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                    if args.scale_weight_norms:
+                        logs = {**max_mean_logs, **logs}
 
-                if args.scale_weight_norms:
-                    logs = {**max_mean_logs, **logs}
+                    progress_bar.set_postfix(**logs)
 
-                progress_bar.set_postfix(**logs)
+                    if val_logs:
+                        logs = {**val_logs, **logs}
 
-                if val_logs:
-                    logs = {**val_logs, **logs}
+                    if args.max_grad_norm != 0.0 :
+                        logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
 
-                if args.max_grad_norm != 0.0 :
-                    logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
+                    if len(accelerator.trackers) > 0:
+                        logs = self.generate_step_logs(
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss
+                        )
+                        accelerator.log(logs, step=global_step)
+                                            
+                    if global_step >= args.max_train_steps:
+                        break
 
                 if len(accelerator.trackers) > 0:
-                    logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss
-                    )
+                    logs = {"loss/epoch": loss_recorder.moving_average}
                     accelerator.log(logs, step=global_step)
-                                        
-                if global_step >= args.max_train_steps:
-                    break
+                                
+                accelerator.wait_for_everyone()
 
-            if len(accelerator.trackers) > 0:
-                logs = {"loss/epoch": loss_recorder.moving_average}
-                accelerator.log(logs, step=global_step)
-                            
-            accelerator.wait_for_everyone()
+                # 指定エポックごとにモデルを保存
+                optimizer_eval_fn()
+                if args.save_every_n_epochs is not None:
+                    saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                    if is_main_process and saving:
+                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
-            # 指定エポックごとにモデルを保存
-            optimizer_eval_fn()
-            if args.save_every_n_epochs is not None:
-                saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
-                if is_main_process and saving:
-                    ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                        if remove_epoch_no is not None:
+                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                            remove_model(remove_ckpt_name)
 
-                    remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
-                    if remove_epoch_no is not None:
-                        remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                        remove_model(remove_ckpt_name)
+                        if args.save_state:
+                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                
+                self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+                optimizer_train_fn()
 
-                    if args.save_state:
-                        train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-            
-            self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-            optimizer_train_fn()
-
-            # end of epoch
+                # end of epoch
 
         # metadata["ss_epoch"] = str(num_train_epochs)
         metadata["ss_training_finished_at"] = str(time.time())
