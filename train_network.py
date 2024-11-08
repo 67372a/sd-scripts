@@ -1431,9 +1431,9 @@ class NetworkTrainer:
                         return loss
                     
                     def closure():
-                        loss = loss_function()
-                        loss.backward()
-                        return loss
+                        closure_loss = loss_function()
+                        accelerator.backward(closure_loss)
+                        return closure_loss
                     
                     loss = loss_function()
 
