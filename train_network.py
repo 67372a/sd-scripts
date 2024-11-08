@@ -1429,12 +1429,7 @@ class NetworkTrainer:
                         loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
                         return loss
-                    
-                    def closure():
-                        closure_loss = loss_function()
-                        accelerator.backward(closure_loss)
-                        return closure_loss
-                    
+                
                     loss = loss_function()
 
                     if train_util.is_sam_optimizer(optimizer, args):  
@@ -1454,6 +1449,11 @@ class NetworkTrainer:
                             grad_norm_clipped = grad_norm
                             
                     if train_util.is_sam_optimizer(optimizer, args):
+                        def closure():
+                            closure_loss = loss_function()
+                            accelerator.backward(closure_loss)
+                            return closure_loss
+                        
                         optimizer.step(closure)
                     else:
                         optimizer.step()
