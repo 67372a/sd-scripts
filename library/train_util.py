@@ -4618,7 +4618,11 @@ def get_optimizer(args, trainable_params):
     if args.optimizer_args is not None and len(args.optimizer_args) > 0:
         for arg in args.optimizer_args:
             key, value = arg.split("=")
-            value = ast.literal_eval(value)
+            print("key="+value)
+            try:
+                value = ast.literal_eval(value)
+            except ValueError:
+                value = value
 
             # value = value.split(",")
             # for i in range(len(value)):
@@ -4897,6 +4901,23 @@ def get_optimizer(args, trainable_params):
             optimizer_module = importlib.import_module(".".join(values[:-1]))
             case_sensitive_optimizer_type = values[-1]
 
+        # Need to handle base optimizer
+        if case_sensitive_optimizer_type.lower() in {"sam","gsam","wsam","bsam"}:
+            case_sensitive_full_base_optimizer_name = optimizer_kwargs.get("base_optimizer_type", None)
+            base_optimizer_values = case_sensitive_full_base_optimizer_name.split(".")
+            base_optimizer_module = importlib.import_module(".".join(base_optimizer_values[:-1]))
+            case_sensitive_base_optimizer_type = base_optimizer_values[-1]
+            base_optimizer_class = getattr(base_optimizer_module, case_sensitive_base_optimizer_type)
+
+            optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
+            optimizer = optimizer_class(trainable_params, base_optimizer_class, lr=lr, **optimizer_kwargs)
+
+            # for logging
+            optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
+            optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
+
+            return optimizer_name, optimizer_args, optimizer
+
         optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
@@ -5003,6 +5024,9 @@ def get_optimizer_train_eval_fn(optimizer: Optimizer, args: argparse.Namespace) 
 def is_schedulefree_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().endswith("schedulefree".lower())  # or args.optimizer_schedulefree_wrapper
 
+def is_sam_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
+    return args.optimizer_type.lower().split(".")[-1] in {"sam","gsam","wsam","bsam"}
+
 
 def get_dummy_scheduler(optimizer: Optimizer) -> Any:
     # dummy scheduler for schedulefree optimizer. supports only empty step(), get_last_lr() and optimizers.
@@ -5052,6 +5076,10 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     # if schedulefree optimizer, return dummy scheduler
     if is_schedulefree_optimizer(optimizer, args):
         return get_dummy_scheduler(optimizer)
+    
+    # Need to apply scheduler to base_optimizer, not sam
+    if is_sam_optimizer(optimizer, args):
+        optimizer = optimizer.base_optimizer
 
     name = args.lr_scheduler
     num_training_steps = args.max_train_steps * num_processes  # * args.gradient_accumulation_steps

@@ -1360,74 +1360,88 @@ class NetworkTrainer:
                         # print(f"set multiplier: {multipliers}")
                         accelerator.unwrap_model(network).set_multiplier(multipliers)
 
-                    text_encoder_conds = []
-                    text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
-                    if text_encoder_outputs_list is not None:
-                        text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
+                    def loss_function():
+                        text_encoder_conds = []
+                        text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+                        if text_encoder_outputs_list is not None:
+                            text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
 
-                    if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
-                        # TODO this does not work if 'some text_encoders are trained' and 'some are not and not cached'
-                        with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
-                            # Get the text embedding for conditioning
-                            if args.weighted_captions:
-                                input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
-                                encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
-                                    tokenize_strategy,
-                                    self.get_models_for_text_encoding(args, accelerator, text_encoders),
-                                    input_ids_list,
-                                    weights_list,
-                                )
+                        if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
+                            # TODO this does not work if 'some text_encoders are trained' and 'some are not and not cached'
+                            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                                # Get the text embedding for conditioning
+                                if args.weighted_captions:
+                                    input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                                    encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
+                                        tokenize_strategy,
+                                        self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                                        input_ids_list,
+                                        weights_list,
+                                    )
+                                else:
+                                    input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                                    encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
+                                        tokenize_strategy,
+                                        self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                                        input_ids,
+                                    )
+                                if args.full_fp16:
+                                    encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+
+                            # if text_encoder_conds is not cached, use encoded_text_encoder_conds
+                            if len(text_encoder_conds) == 0:
+                                text_encoder_conds = encoded_text_encoder_conds
                             else:
-                                input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
-                                encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
-                                    tokenize_strategy,
-                                    self.get_models_for_text_encoding(args, accelerator, text_encoders),
-                                    input_ids,
-                                )
-                            if args.full_fp16:
-                                encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+                                # if encoded_text_encoder_conds is not None, update cached text_encoder_conds
+                                for i in range(len(encoded_text_encoder_conds)):
+                                    if encoded_text_encoder_conds[i] is not None:
+                                        text_encoder_conds[i] = encoded_text_encoder_conds[i]
 
-                        # if text_encoder_conds is not cached, use encoded_text_encoder_conds
-                        if len(text_encoder_conds) == 0:
-                            text_encoder_conds = encoded_text_encoder_conds
-                        else:
-                            # if encoded_text_encoder_conds is not None, update cached text_encoder_conds
-                            for i in range(len(encoded_text_encoder_conds)):
-                                if encoded_text_encoder_conds[i] is not None:
-                                    text_encoder_conds[i] = encoded_text_encoder_conds[i]
+                        # sample noise, call unet, get target
+                        noise_pred, target, timesteps, huber_c, weighting = self.get_noise_pred_and_target(
+                            args,
+                            accelerator,
+                            noise_scheduler,
+                            latents,
+                            batch,
+                            text_encoder_conds,
+                            unet,
+                            network,
+                            weight_dtype,
+                            train_unet,
+                        )
 
-                    # sample noise, call unet, get target
-                    noise_pred, target, timesteps, huber_c, weighting = self.get_noise_pred_and_target(
-                        args,
-                        accelerator,
-                        noise_scheduler,
-                        latents,
-                        batch,
-                        text_encoder_conds,
-                        unet,
-                        network,
-                        weight_dtype,
-                        train_unet,
-                    )
+                        loss = train_util.conditional_loss(
+                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                        )
+                        if weighting is not None:
+                            loss = loss * weighting
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean([1, 2, 3])
 
-                    loss = train_util.conditional_loss(
-                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
-                    )
-                    if weighting is not None:
-                        loss = loss * weighting
-                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                        loss = apply_masked_loss(loss, batch)
-                    loss = loss.mean([1, 2, 3])
+                        loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                        loss = loss * loss_weights
 
-                    loss_weights = batch["loss_weights"]  # 各sampleごとのweight
-                    loss = loss * loss_weights
+                        # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
+                        loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                    # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                        loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
-                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                        return loss
                     
-                    accelerator.backward(loss)
+                    def closure():
+                        loss = loss_function()
+                        loss.backward()
+                        return loss
+                    
+                    loss = loss_function()
+
+                    if train_util.is_sam_optimizer(optimizer, args):  
+                        with accelerator.no_sync(network):
+                            accelerator.backward(loss)
+                    else:
+                        accelerator.backward(loss)
 
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
@@ -1439,7 +1453,11 @@ class NetworkTrainer:
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                             grad_norm_clipped = grad_norm
                             
-                    optimizer.step()
+                    if train_util.is_sam_optimizer(optimizer, args):
+                        optimizer.step(closure)
+                    else:
+                        optimizer.step()
+
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
