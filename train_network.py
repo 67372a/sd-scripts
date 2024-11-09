@@ -1592,10 +1592,11 @@ class NetworkTrainer:
                                 weighting = saved_data['weighting']
                                 noisy_latents = saved_data['noisy_latents']
 
-                                for x in noisy_latents:
-                                    x.requires_grad_(True)
-                                for t in text_encoder_conds:
-                                    t.requires_grad_(True)
+                                if args.gradient_checkpointing:
+                                    for x in noisy_latents:
+                                        x.requires_grad_(True)
+                                    for t in text_encoder_conds:
+                                        t.requires_grad_(True)
 
                                 if idx + 1 != len(batch_data_list) and accelerator.num_processes > 1:   
                                     # Accumulate gradients without synchronizing
