@@ -1340,7 +1340,7 @@ class NetworkTrainer:
                     # Determine whether we should synchronize gradients
                     sync_gradients = (accumulation_counter + 1) % iter_size == 0 or (step + 1 == len(skipped_dataloader or train_dataloader))
 
-                    effective_batch_size = accumulation_counter if sync_gradients else iter_size
+                    effective_batch_size = accumulation_counter + 1 if sync_gradients else iter_size
                     loss_scaling = 1.0 / effective_batch_size
 
                     # Prevent gradient synchronization during accumulation steps in distributed settings
