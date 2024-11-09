@@ -1451,12 +1451,12 @@ class NetworkTrainer:
                             # Collect necessary data for recomputation during second step
                             batch_data_list.append({
                                 'batch': batch,
-                                'text_encoder_conds': [cond.detach().clone() for cond in text_encoder_conds],
-                                'timesteps': timesteps.detach().clone(),
-                                'target': target.detach().clone(),
+                                'text_encoder_conds': [cond for cond in text_encoder_conds],
+                                'timesteps': timesteps,
+                                'target': target,
                                 'huber_c': huber_c,
-                                'weighting': weighting.detach().clone() if weighting is not None else None,
-                                'noisy_latents': noisy_latents.detach().clone(),
+                                'weighting': weighting if weighting is not None else None,
+                                'noisy_latents': noisy_latents,
                             })
 
                         accumulation_counter += 1
@@ -1566,12 +1566,12 @@ class NetworkTrainer:
                         # Collect necessary data for recomputation during second step
                         batch_data_list.append({
                             'batch': batch,
-                            'text_encoder_conds': [cond.detach().clone() for cond in text_encoder_conds],
-                            'timesteps': timesteps.detach().clone(),
-                            'target': target.detach().clone(),
+                            'text_encoder_conds': [cond for cond in text_encoder_conds],
+                            'timesteps': timesteps,
+                            'target': target,
                             'huber_c': huber_c,
-                            'weighting': weighting.detach().clone() if weighting is not None else None,
-                            'noisy_latents': noisy_latents.detach().clone(),
+                            'weighting': weighting if weighting is not None else None,
+                            'noisy_latents': noisy_latents,
                         })
 
                         accumulation_counter += 1
@@ -1675,7 +1675,7 @@ class NetworkTrainer:
                                     loss = loss.mean()  # Average over batch
 
                                     # Divide loss by iter_size to average over accumulated steps
-                                    loss = loss * loss_scaling
+                                    loss = loss / len(batch_data_list)
 
                                     # Accumulate total loss
                                     total_loss += loss.detach()
@@ -1688,7 +1688,7 @@ class NetworkTrainer:
                             if args.max_grad_norm != 0.0:
                                 accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
 
-                            return total_loss / len(batch_data_list)
+                            return total_loss
 
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
