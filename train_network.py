@@ -1317,7 +1317,7 @@ class NetworkTrainer:
         # Initialize lists to store necessary data for recomputing the loss
         batch_data_list = []
 
-        if train_util.is_sam_optimizer(optimizer, args):
+        if train_util.is_sam_optimizer(args):
             for epoch in range(epoch_to_start, num_train_epochs):
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
                 current_epoch.value = epoch + 1
@@ -1582,7 +1582,7 @@ class NetworkTrainer:
                             total_loss = 0.0
 
                             # Second pass over the accumulated batches for the second step
-                            for saved_data in batch_data_list:
+                            for idx, saved_data in enumerate(batch_data_list):
                                 # Unpack saved data
                                 batch = saved_data['batch']
                                 text_encoder_conds = saved_data['text_encoder_conds']
@@ -1597,46 +1597,90 @@ class NetworkTrainer:
                                 for t in text_encoder_conds:
                                     t.requires_grad_(True)
 
-                                # Predict the noise residual
-                                with accelerator.autocast():
-                                    noise_pred = self.call_unet(
-                                        args,
-                                        accelerator,
-                                        unet,
-                                        noisy_latents.requires_grad_(True),
-                                        timesteps,
-                                        text_encoder_conds,
-                                        batch,
-                                        weight_dtype,
+                                if idx + 1 != len(batch_data_list) and accelerator.num_processes > 1:   
+                                    # Accumulate gradients without synchronizing
+                                    with accelerator.no_sync(training_model):
+                                        # Predict the noise residual
+                                        with accelerator.autocast():
+                                            noise_pred = self.call_unet(
+                                                args,
+                                                accelerator,
+                                                unet,
+                                                noisy_latents.requires_grad_(True),
+                                                timesteps,
+                                                text_encoder_conds,
+                                                batch,
+                                                weight_dtype,
+                                            )
+
+                                        # Recompute loss
+                                        loss = train_util.conditional_loss(
+                                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                                        )
+                                        if weighting is not None:
+                                            loss = loss * weighting
+                                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                                            loss = apply_masked_loss(loss, batch)
+                                        loss = loss.mean([1, 2, 3])
+
+                                        loss_weights = batch["loss_weights"]  # Sample-wise weights
+
+                                        loss = loss * loss_weights
+
+                                        # Post-process loss if needed
+                                        loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                                        loss = loss.mean()  # Average over batch
+
+                                        # Divide loss by iter_size to average over accumulated steps
+                                        loss = loss * loss_scaling
+
+                                        # Accumulate total loss
+                                        total_loss += loss.detach()
+
+                                        # Backward pass
+                                        accelerator.backward(loss)
+                                else:
+                                    # Predict the noise residual
+                                    with accelerator.autocast():
+                                        noise_pred = self.call_unet(
+                                            args,
+                                            accelerator,
+                                            unet,
+                                            noisy_latents.requires_grad_(True),
+                                            timesteps,
+                                            text_encoder_conds,
+                                            batch,
+                                            weight_dtype,
+                                        )
+
+                                    # Recompute loss
+                                    loss = train_util.conditional_loss(
+                                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
                                     )
+                                    if weighting is not None:
+                                        loss = loss * weighting
+                                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                                        loss = apply_masked_loss(loss, batch)
+                                    loss = loss.mean([1, 2, 3])
 
-                                # Recompute loss
-                                loss = train_util.conditional_loss(
-                                    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
-                                )
-                                if weighting is not None:
-                                    loss = loss * weighting
-                                if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                                    loss = apply_masked_loss(loss, batch)
-                                loss = loss.mean([1, 2, 3])
+                                    loss_weights = batch["loss_weights"]  # Sample-wise weights
 
-                                loss_weights = batch["loss_weights"]  # Sample-wise weights
+                                    loss = loss * loss_weights
 
-                                loss = loss * loss_weights
+                                    # Post-process loss if needed
+                                    loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                                # Post-process loss if needed
-                                loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                                    loss = loss.mean()  # Average over batch
 
-                                loss = loss.mean()  # Average over batch
+                                    # Divide loss by iter_size to average over accumulated steps
+                                    loss = loss * loss_scaling
 
-                                # Divide loss by iter_size to average over accumulated steps
-                                loss = loss * loss_scaling
+                                    # Accumulate total loss
+                                    total_loss += loss.detach()
 
-                                # Accumulate total loss
-                                total_loss += loss.detach()
-
-                                # Backward pass
-                                accelerator.backward(loss)
+                                    # Backward pass
+                                    accelerator.backward(loss)
 
                             self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
