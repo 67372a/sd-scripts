@@ -79,17 +79,31 @@ def prepare_deepspeed_plugin(args: argparse.Namespace):
         )
         exit(1)
 
-    deepspeed_plugin = DeepSpeedPlugin(
-        zero_stage=args.zero_stage,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        gradient_clipping=args.max_grad_norm,
-        offload_optimizer_device=args.offload_optimizer_device,
-        offload_optimizer_nvme_path=args.offload_optimizer_nvme_path,
-        offload_param_device=args.offload_param_device,
-        offload_param_nvme_path=args.offload_param_nvme_path,
-        zero3_init_flag=args.zero3_init_flag,
-        zero3_save_16bit_model=args.zero3_save_16bit_model,
-    )
+    if is_sam_optimizer(args):
+        # Don't set gradient_accumulation_steps, as handled manually in training loop for SAM
+        deepspeed_plugin = DeepSpeedPlugin(
+            zero_stage=args.zero_stage,
+            gradient_clipping=args.max_grad_norm,
+            offload_optimizer_device=args.offload_optimizer_device,
+            offload_optimizer_nvme_path=args.offload_optimizer_nvme_path,
+            offload_param_device=args.offload_param_device,
+            offload_param_nvme_path=args.offload_param_nvme_path,
+            zero3_init_flag=args.zero3_init_flag,
+            zero3_save_16bit_model=args.zero3_save_16bit_model,
+        )
+    else:
+        deepspeed_plugin = DeepSpeedPlugin(
+            zero_stage=args.zero_stage,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            gradient_clipping=args.max_grad_norm,
+            offload_optimizer_device=args.offload_optimizer_device,
+            offload_optimizer_nvme_path=args.offload_optimizer_nvme_path,
+            offload_param_device=args.offload_param_device,
+            offload_param_nvme_path=args.offload_param_nvme_path,
+            zero3_init_flag=args.zero3_init_flag,
+            zero3_save_16bit_model=args.zero3_save_16bit_model,
+        )
+
     deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = args.train_batch_size
     deepspeed_plugin.deepspeed_config["train_batch_size"] = (
         args.train_batch_size * args.gradient_accumulation_steps * int(os.environ["WORLD_SIZE"])
@@ -137,3 +151,6 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
 
     ds_model = DeepSpeedWrapper(**models)
     return ds_model
+
+def is_sam_optimizer(args: argparse.Namespace) -> bool:
+    return args.optimizer_type.lower().split(".")[-1] in {"sam","gsam","wsam","bsam"}

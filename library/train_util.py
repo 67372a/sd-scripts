@@ -5023,10 +5023,10 @@ def get_optimizer_train_eval_fn(optimizer: Optimizer, args: argparse.Namespace) 
 def is_schedulefree_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().endswith("schedulefree".lower())  # or args.optimizer_schedulefree_wrapper
 
-def is_sam_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
+def is_sam_optimizer(args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().split(".")[-1] in {"sam","gsam","wsam","bsam"}
 
-def is_bsam_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
+def is_bsam_optimizer(args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().split(".")[-1] in {"bsam"}
 
 
@@ -5080,7 +5080,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         return get_dummy_scheduler(optimizer)
     
     # Need to apply scheduler to base_optimizer, not sam
-    if is_sam_optimizer(optimizer, args) and not is_bsam_optimizer(optimizer, args):
+    if is_sam_optimizer(args) and not is_bsam_optimizer(args):
         optimizer = optimizer.base_optimizer
 
     name = args.lr_scheduler
@@ -5326,15 +5326,27 @@ def prepare_accelerator(args: argparse.Namespace):
     kwargs_handlers = [i for i in kwargs_handlers if i is not None]
     deepspeed_plugin = deepspeed_utils.prepare_deepspeed_plugin(args)
 
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=log_with,
-        project_dir=logging_dir,
-        kwargs_handlers=kwargs_handlers,
-        dynamo_backend=dynamo_backend,
-        deepspeed_plugin=deepspeed_plugin,
-    )
+    if is_sam_optimizer(args):
+        # Don't set gradient_accumulation_steps, as handled manually in training loop for SAM
+        accelerator = Accelerator(
+            mixed_precision=args.mixed_precision,
+            log_with=log_with,
+            project_dir=logging_dir,
+            kwargs_handlers=kwargs_handlers,
+            dynamo_backend=dynamo_backend,
+            deepspeed_plugin=deepspeed_plugin,
+        )
+    else:
+        accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            mixed_precision=args.mixed_precision,
+            log_with=log_with,
+            project_dir=logging_dir,
+            kwargs_handlers=kwargs_handlers,
+            dynamo_backend=dynamo_backend,
+            deepspeed_plugin=deepspeed_plugin,
+        )
+
     print("accelerator device:", accelerator.device)
     return accelerator
 
