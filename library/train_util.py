@@ -4901,7 +4901,7 @@ def get_optimizer(args, trainable_params):
             case_sensitive_optimizer_type = values[-1]
 
         # Need to handle base optimizer
-        if case_sensitive_optimizer_type.lower() in {"sam","gsam","wsam"}:
+        if case_sensitive_optimizer_type.lower() in {"sam","gsam","wsam"} or case_sensitive_optimizer_type.lower() == "schedulefreewrapper":
             case_sensitive_full_base_optimizer_name = optimizer_kwargs.get("base_optimizer_type", None)
             base_optimizer_values = case_sensitive_full_base_optimizer_name.split(".")
             base_optimizer_module = importlib.import_module(".".join(base_optimizer_values[:-1]))
@@ -4914,6 +4914,9 @@ def get_optimizer(args, trainable_params):
             # for logging
             optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
             optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
+
+            if case_sensitive_optimizer_type.lower() == "schedulefreewrapper":
+                optimizer.train()
 
             return optimizer_name, optimizer_args, optimizer
 
@@ -5009,7 +5012,7 @@ def get_optimizer(args, trainable_params):
 
 
 def get_optimizer_train_eval_fn(optimizer: Optimizer, args: argparse.Namespace) -> Tuple[Callable, Callable]:
-    if not is_schedulefree_optimizer(optimizer, args):
+    if not is_schedulefree_optimizer(optimizer, args) and not is_schedulefree_wrapper_optimizer(args):
         # return dummy func
         return lambda: None, lambda: None
 
@@ -5022,6 +5025,9 @@ def get_optimizer_train_eval_fn(optimizer: Optimizer, args: argparse.Namespace) 
 
 def is_schedulefree_optimizer(optimizer: Optimizer, args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().endswith("schedulefree".lower())  # or args.optimizer_schedulefree_wrapper
+
+def is_schedulefree_wrapper_optimizer(args: argparse.Namespace) -> bool:
+    return args.optimizer_type.lower().endswith("schedulefreewrapper")
 
 def is_sam_optimizer(args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().split(".")[-1] in {"sam","gsam","wsam","bsam"}
@@ -5079,8 +5085,8 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     if is_schedulefree_optimizer(optimizer, args):
         return get_dummy_scheduler(optimizer)
     
-    # Need to apply scheduler to base_optimizer, not sam
-    if is_sam_optimizer(args) and not is_bsam_optimizer(args):
+    # Need to apply scheduler to base_optimizer
+    if (is_sam_optimizer(args) and not is_bsam_optimizer(args)) or is_schedulefree_wrapper_optimizer(args):
         optimizer = optimizer.base_optimizer
 
     name = args.lr_scheduler
