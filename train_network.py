@@ -9,6 +9,7 @@ import json
 from multiprocessing import Value
 from typing import Any, List
 import toml
+from tools.grokfast import Gradfilter_ma, Gradfilter_ema
 
 from tqdm import tqdm
 
@@ -1317,6 +1318,24 @@ class NetworkTrainer:
         # Initialize lists to store necessary data for recomputing the loss
         batch_data_list = []
 
+        if args.grokfast_type:
+            if args.grokfast_type.lower() == "ema":
+                grad_filter = Gradfilter_ema(accelerator.unwrap_model(network), 
+                                             alpha=float(args.grokfast_ema_alpha) if args.grokfast_ema_alpha is not None else 0.98, 
+                                             lamb=float(args.grokfast_lamb) if args.grokfast_lamb is not None else 2.0, 
+                                             warmup_steps=int(args.grokfast_warmup_steps) if args.grokfast_warmup_steps is not None else 0, 
+                                             dtype=weight_dtype)
+            elif args.grokfast_type.lower() == "ma":
+                gf_window_size = int(args.grokfast_ma_window_size) if args.grokfast_ma_window_size is not None else 25
+
+                grad_filter = Gradfilter_ma(accelerator.unwrap_model(network), 
+                                            window_size=gf_window_size,
+                                            lamb=float(args.grokfast_lamb) if args.grokfast_lamb is not None else 5.0, 
+                                            filter_type=args.grokfast_ma_filter_type, 
+                                            warmup_steps=int(args.grokfast_warmup_steps) if args.grokfast_warmup_steps is not None else gf_window_size, 
+                                            dtype=weight_dtype)
+            accelerator.register_for_checkpointing(grad_filter)
+
         if train_util.is_sam_optimizer(args):
             for epoch in range(epoch_to_start, num_train_epochs):
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
@@ -1688,6 +1707,9 @@ class NetworkTrainer:
                             if args.max_grad_norm != 0.0:
                                 accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
 
+                            if args.grokfast_type:
+                                grad_filter.filter()
+
                             return total_loss
 
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
@@ -1698,6 +1720,9 @@ class NetworkTrainer:
                         else: 
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                             grad_norm_clipped = grad_norm
+
+                        if args.grokfast_type:
+                            grad_filter.filter()
 
                         # Perform step
                         optimizer.step(closure)
@@ -1947,7 +1972,10 @@ class NetworkTrainer:
                             else: 
                                 grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                                 grad_norm_clipped = grad_norm
-                                
+
+                            if args.grokfast_type:
+                                grad_filter.filter()
+
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad(set_to_none=True)
@@ -2236,6 +2264,47 @@ def setup_parser() -> argparse.ArgumentParser:
         help="initial step number including all epochs, 0 means first step (same as not specifying). overwrites initial_epoch."
         + " / 初期ステップ数、全エポックを含むステップ数、0で最初のステップ（未指定時と同じ）。initial_epochを上書きする",
     )
+    parser.add_argument(
+        "--grokfast_type",
+        type=str,
+        default=None,
+        choices=[None, "ema", "ma"],
+        help="Grokfast type to apply exponential moving average (ema), which stores one ema state per parameter, or moving average (ma) which stores up to the window size of gradients.",
+    )
+    parser.add_argument(
+        "--grokfast_ema_alpha",
+        type=float,
+        default=0.98,
+        help="Momentum hyperparameter of the EMA.",
+    )
+    parser.add_argument(
+        "--grokfast_lamb",
+        type=float,
+        default=None,
+        help="Amplifying factor hyperparameter of the filter. Default of 5.0 for moving average, 2.0 for exponential moving average.",
+    )
+    parser.add_argument(
+        "--grokfast_warmup_steps",
+        type=int,
+        default=None,
+        help="Number of steps to warmup, gradually increasing application of the filter.",
+    )
+
+    parser.add_argument(
+        "--grokfast_ma_window_size",
+        type=int,
+        default=25,
+        help="The width of the moving average filter window. additional memory requirements increases linearly with respect to the windows size.",
+    )
+
+    parser.add_argument(
+        "--grokfast_ma_filter_type",
+        type=str,
+        default="mean",
+        choices=[None, "mean", "sum"],
+        help="Aggregation method for the moving average running queue.",
+    )
+
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
     # parser.add_argument("--loraplus_text_encoder_lr_ratio", default=None, type=float, help="LoRA+ text encoder learning rate ratio")
