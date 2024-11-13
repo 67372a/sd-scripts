@@ -1650,6 +1650,9 @@ class NetworkTrainer:
                                         # Post-process loss if needed
                                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
+                                        if args.loss_multipler:
+                                            loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
                                         loss = loss.mean()  # Average over batch
 
                                         # Divide loss by iter_size to average over accumulated steps
@@ -1690,6 +1693,9 @@ class NetworkTrainer:
 
                                     # Post-process loss if needed
                                     loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                                    if args.loss_multipler:
+                                        loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                                     loss = loss.mean()  # Average over batch
 
@@ -1958,6 +1964,9 @@ class NetworkTrainer:
 
                         # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                        if args.loss_multipler:
+                            loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                         loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
                         
@@ -2303,6 +2312,13 @@ def setup_parser() -> argparse.ArgumentParser:
         default="mean",
         choices=[None, "mean", "sum"],
         help="Aggregation method for the moving average running queue.",
+    )
+
+    parser.add_argument(
+        "--loss_multipler",
+        type=float,
+        default=1.0,
+        help="A raw multipler to apply to loss.",
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
