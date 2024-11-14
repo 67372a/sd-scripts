@@ -1998,7 +1998,7 @@ class DreamBoothDataset(BaseDataset):
         num_reg_images = 0
         num_val_images = 0
         reg_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
-        val_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
+        #val_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
         for subset in subsets:
             if subset.num_repeats < 1:
                 logger.warning(
@@ -2019,10 +2019,16 @@ class DreamBoothDataset(BaseDataset):
                 )
                 continue
 
+            if subset.is_val and self.is_train:
+                logger.warning(
+                    f"ignore subset with image_dir='{subset.image_dir}': val subset in training dataset"
+                )
+                continue
+
             if subset.is_reg:
                 num_reg_images += subset.num_repeats * len(img_paths)
-            elif subset.is_val:
-                num_val_images += subset.num_repeats * len(img_paths)
+            #elif subset.is_val:
+            #    num_val_images += subset.num_repeats * len(img_paths)
             else:
                 num_train_images += subset.num_repeats * len(img_paths)
 
@@ -2032,8 +2038,8 @@ class DreamBoothDataset(BaseDataset):
                     info.image_size = size
                 if subset.is_reg:
                     reg_infos.append((info, subset))
-                if subset.is_val:
-                    val_infos.append((info, subset))
+                #if subset.is_val:
+                #    val_infos.append((info, subset))
                 else:
                     self.register_image(info, subset)
 
@@ -2065,23 +2071,23 @@ class DreamBoothDataset(BaseDataset):
                         break
                 first_loop = False
 
-        if num_val_images == 0:
-            logger.warning("no validation images / TBD")
-        else:
+        #if num_val_images == 0:
+        #    logger.warning("no validation images / TBD")
+        #else:
             # num_repeatsを計算する：どうせ大した数ではないのでループで処理する
-            n = 0
-            first_loop = True
-            while n < num_train_images:
-                for info, subset in val_infos:
-                    if first_loop:
-                        self.register_image(info, subset)
-                        n += info.num_repeats
-                    else:
-                        info.num_repeats += 1  # rewrite registered info
-                        n += 1
-                    if n >= num_train_images:
-                        break
-                first_loop = False
+        #    n = 0
+        #    first_loop = True
+        #    while n < num_train_images:
+        #        for info, subset in val_infos:
+        #            if first_loop:
+        #                self.register_image(info, subset)
+        #                n += info.num_repeats
+        #            else:
+        #                info.num_repeats += 1  # rewrite registered info
+        #                n += 1
+        #            if n >= num_train_images:
+        #                break
+        #        first_loop = False
 
         self.num_reg_images = num_reg_images
         self.num_val_images = num_val_images
@@ -2107,6 +2113,7 @@ class FineTuningDataset(BaseDataset):
 
         self.num_train_images = 0
         self.num_reg_images = 0
+        self.num_val_images = 0
 
         for subset in subsets:
             if subset.num_repeats < 1:
@@ -2386,7 +2393,8 @@ class ControlNetDataset(BaseDataset):
         self.image_data = self.dreambooth_dataset_delegate.image_data
         self.batch_size = batch_size
         self.num_train_images = self.dreambooth_dataset_delegate.num_train_images
-        self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images        
+        self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images
+        self.num_val_images = self.dreambooth_dataset_delegate.num_val_images   
         self.is_train = is_train
         self.validation_split = float(validation_split) if validation_split is not None else 0.0
         self.validation_seed = int(validation_seed) if validation_seed is not None else None
@@ -2512,6 +2520,7 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
         self.image_data = {}
         self.num_train_images = 0
         self.num_reg_images = 0
+        self.num_val_images = 0
 
         # simply concat together
         # TODO: handling image_data key duplication among dataset
@@ -2520,6 +2529,7 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
             self.image_data.update(dataset.image_data)
             self.num_train_images += dataset.num_train_images
             self.num_reg_images += dataset.num_reg_images
+            self.num_val_images += dataset.num_val_images
 
     def add_replacement(self, str_from, str_to):
         for dataset in self.datasets:
@@ -2798,6 +2808,7 @@ class MinimalDataset(BaseDataset):
 
         self.num_train_images = 0  # update in subclass
         self.num_reg_images = 0  # update in subclass
+        self.num_val_images = 0  # update in subclass
         self.datasets = [self]
         self.batch_size = 1  # update in subclass
 

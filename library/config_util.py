@@ -539,6 +539,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
             subset_blueprint.params.caption_tag_dropout_rate = 0.0
             subset_blueprint.params.token_warmup_step = 0
             subset_blueprint.params.shuffle_caption = False
+            subset_blueprint.params.is_val = True
 
             if subset_klass != DreamBoothSubset or (subset_klass == DreamBoothSubset and not subset_blueprint.params.is_reg):
                 subsets.append(subset_klass(**asdict(subset_blueprint.params)))

@@ -429,7 +429,7 @@ class NetworkTrainer:
                            args, 
                            train_text_encoder=True):
         if global_step != 0 and global_step < args.max_train_steps:
-            if args.validation_split is None:
+            if val_dataloader is None:
                 return None, None, None
             else:
                 if args.validation_every_n_step is not None:
