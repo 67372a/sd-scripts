@@ -525,6 +525,10 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
 
         subsets = []
         for subset_blueprint in dataset_blueprint.subsets:
+            # Already handled by earlier logic
+            if subset_blueprint.params.is_val:
+                continue
+
             # Set values for consistency
             subset_blueprint.params.num_repeats = 1
             subset_blueprint.params.color_aug = False
@@ -538,9 +542,6 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
 
             if subset_klass != DreamBoothSubset or (subset_klass == DreamBoothSubset and not subset_blueprint.params.is_reg):
                 subsets.append(subset_klass(**asdict(subset_blueprint.params)))
-
-            if subset_blueprint.params.is_val:
-                continue
 
         dataset = dataset_klass(subsets=subsets, is_train=False, **asdict(dataset_blueprint.params))
         val_datasets.append(dataset)
