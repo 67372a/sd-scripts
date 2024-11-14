@@ -78,6 +78,7 @@ class BaseSubsetParams:
 @dataclass
 class DreamBoothSubsetParams(BaseSubsetParams):
     is_reg: bool = False
+    is_val: Optional[bool] = False
     class_tokens: Optional[str] = None
     caption_extension: str = ".caption"
     cache_info: bool = False
@@ -209,6 +210,7 @@ class ConfigSanitizer:
     DB_SUBSET_DISTINCT_SCHEMA = {
         Required("image_dir"): str,
         "is_reg": bool,
+        "is_val": bool,
         "alpha_mask": bool,
     }
     # FT means FineTuning
@@ -467,6 +469,7 @@ class BlueprintGenerator:
 
 def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlueprint):
     datasets: List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
+    val_datasets:List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
 
     for dataset_blueprint in dataset_group_blueprint.datasets:
         if dataset_blueprint.is_controlnet:
@@ -479,11 +482,33 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
             subset_klass = FineTuningSubset
             dataset_klass = FineTuningDataset
 
-        subsets = [subset_klass(**asdict(subset_blueprint.params)) for subset_blueprint in dataset_blueprint.subsets]
+        subsets = []
+        val_subsets = []
+
+        for subset_blueprint in dataset_blueprint.subsets:
+            if subset_blueprint.params.is_val:
+                # Set values for consistency
+                subset_blueprint.params.num_repeats = 1
+                subset_blueprint.params.color_aug = False
+                subset_blueprint.params.flip_aug = False
+                subset_blueprint.params.random_crop = False
+                subset_blueprint.params.caption_dropout_rate = 0.0
+                subset_blueprint.params.caption_dropout_every_n_epochs = 0
+                subset_blueprint.params.caption_tag_dropout_rate = 0.0
+                subset_blueprint.params.token_warmup_step = 0
+                subset_blueprint.params.shuffle_caption = False
+
+                val_subsets.append(subset_klass(**asdict(subset_blueprint.params)))
+            else:
+                subsets.append(subset_klass(**asdict(subset_blueprint.params)))
+
+        if len(val_subsets) > 0:
+            val_dataset = dataset_klass(subsets=val_subsets, is_train=False, **asdict(dataset_blueprint.params))
+            val_datasets.append(val_dataset)
+
         dataset = dataset_klass(subsets=subsets, is_train=True, **asdict(dataset_blueprint.params))
         datasets.append(dataset)
 
-    val_datasets:List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
 
     for dataset_blueprint in dataset_group_blueprint.datasets:
         if float(dataset_blueprint.params.validation_split) <= 0.0:
@@ -500,6 +525,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
 
         subsets = []
         for subset_blueprint in dataset_blueprint.subsets:
+            # Set values for consistency
             subset_blueprint.params.num_repeats = 1
             subset_blueprint.params.color_aug = False
             subset_blueprint.params.flip_aug = False
@@ -508,9 +534,13 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
             subset_blueprint.params.caption_dropout_every_n_epochs = 0
             subset_blueprint.params.caption_tag_dropout_rate = 0.0
             subset_blueprint.params.token_warmup_step = 0
+            subset_blueprint.params.shuffle_caption = False
 
             if subset_klass != DreamBoothSubset or (subset_klass == DreamBoothSubset and not subset_blueprint.params.is_reg):
                 subsets.append(subset_klass(**asdict(subset_blueprint.params)))
+
+            if subset_blueprint.params.is_val:
+                continue
 
         dataset = dataset_klass(subsets=subsets, is_train=False, **asdict(dataset_blueprint.params))
         val_datasets.append(dataset)
@@ -582,6 +612,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     dedent(
                         f"""\
           is_reg: {subset.is_reg}
+          is_val: {subset.is_val}
           class_tokens: {subset.class_tokens}
           caption_extension: {subset.caption_extension}
         \n"""
@@ -654,6 +685,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     dedent(
                         f"""\
           is_reg: {subset.is_reg}
+          is_val: {subset.is_val}
           class_tokens: {subset.class_tokens}
           caption_extension: {subset.caption_extension}
         \n"""
@@ -701,7 +733,7 @@ def generate_dreambooth_subsets_config_by_subdirs(train_data_dir: Optional[str] 
         caption_by_folder = "_".join(tokens[1:])
         return n_repeats, caption_by_folder
 
-    def generate(base_dir: Optional[str], is_reg: bool):
+    def generate(base_dir: Optional[str], is_reg: bool, is_val: bool):
         if base_dir is None:
             return []
 
@@ -718,7 +750,7 @@ def generate_dreambooth_subsets_config_by_subdirs(train_data_dir: Optional[str] 
             if num_repeats < 1:
                 continue
 
-            subset_config = {"image_dir": str(subdir), "num_repeats": num_repeats, "is_reg": is_reg, "class_tokens": class_tokens}
+            subset_config = {"image_dir": str(subdir), "num_repeats": num_repeats, "is_reg": is_reg, "is_val": is_val, "class_tokens": class_tokens}
             subsets_config.append(subset_config)
 
         return subsets_config

@@ -161,11 +161,12 @@ def split_train_val(paths, is_train, validation_split, validation_seed):
         return paths[len(paths) - round(len(paths) * validation_split):]
 
 class ImageInfo:
-    def __init__(self, image_key: str, num_repeats: int, caption: str, is_reg: bool, absolute_path: str) -> None:
+    def __init__(self, image_key: str, num_repeats: int, caption: str, is_reg: bool, is_val: bool, absolute_path: str) -> None:
         self.image_key: str = image_key
         self.num_repeats: int = num_repeats
         self.caption: str = caption
         self.is_reg: bool = is_reg
+        self.is_val: bool = is_val
         self.absolute_path: str = absolute_path
         self.image_size: Tuple[int, int] = None
         self.resized_size: Tuple[int, int] = None
@@ -444,6 +445,7 @@ class DreamBoothSubset(BaseSubset):
         self,
         image_dir: str,
         is_reg: bool,
+        is_val: bool,
         class_tokens: Optional[str],
         caption_extension: str,
         cache_info: bool,
@@ -495,6 +497,7 @@ class DreamBoothSubset(BaseSubset):
         )
 
         self.is_reg = is_reg
+        self.is_val = is_val
         self.class_tokens = class_tokens
         self.caption_extension = caption_extension
         if self.caption_extension and not self.caption_extension.startswith("."):
@@ -1993,7 +1996,9 @@ class DreamBoothDataset(BaseDataset):
         logger.info("prepare images.")
         num_train_images = 0
         num_reg_images = 0
+        num_val_images = 0
         reg_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
+        val_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
         for subset in subsets:
             if subset.num_repeats < 1:
                 logger.warning(
@@ -2016,15 +2021,19 @@ class DreamBoothDataset(BaseDataset):
 
             if subset.is_reg:
                 num_reg_images += subset.num_repeats * len(img_paths)
+            elif subset.is_val:
+                num_val_images += subset.num_repeats * len(img_paths)
             else:
                 num_train_images += subset.num_repeats * len(img_paths)
 
             for img_path, caption, size in zip(img_paths, captions, sizes):
-                info = ImageInfo(img_path, subset.num_repeats, caption, subset.is_reg, img_path)
+                info = ImageInfo(img_path, subset.num_repeats, caption, subset.is_reg, subset.is_val, img_path)
                 if size is not None:
                     info.image_size = size
                 if subset.is_reg:
                     reg_infos.append((info, subset))
+                if subset.is_val:
+                    val_infos.append((info, subset))
                 else:
                     self.register_image(info, subset)
 
@@ -2056,7 +2065,26 @@ class DreamBoothDataset(BaseDataset):
                         break
                 first_loop = False
 
+        if num_val_images == 0:
+            logger.warning("no validation images / TBD")
+        else:
+            # num_repeatsを計算する：どうせ大した数ではないのでループで処理する
+            n = 0
+            first_loop = True
+            while n < num_train_images:
+                for info, subset in val_infos:
+                    if first_loop:
+                        self.register_image(info, subset)
+                        n += info.num_repeats
+                    else:
+                        info.num_repeats += 1  # rewrite registered info
+                        n += 1
+                    if n >= num_train_images:
+                        break
+                first_loop = False
+
         self.num_reg_images = num_reg_images
+        self.num_val_images = num_val_images
 
 
 class FineTuningDataset(BaseDataset):
@@ -2778,6 +2806,7 @@ class MinimalDataset(BaseDataset):
         self.img_count = 1  # update in subclass if needed
         self.bucket_info = {}
         self.is_reg = False
+        self.is_val = False
         self.image_dir = "dummy"  # for metadata
 
     def verify_bucket_reso_steps(self, min_steps: int):

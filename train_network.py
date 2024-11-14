@@ -1064,7 +1064,8 @@ class NetworkTrainer:
                     if is_dreambooth_dataset:
                         subset_metadata["class_tokens"] = subset.class_tokens
                         subset_metadata["is_reg"] = subset.is_reg
-                        if subset.is_reg:
+                        subset_metadata["is_val"] = subset.is_val
+                        if subset.is_reg or subset.is_val:
                             image_dir_or_metadata_file = None  # not merging reg dataset
                     else:
                         metadata_file = os.path.basename(subset.metadata_file)
@@ -1114,9 +1115,15 @@ class NetworkTrainer:
 
             dataset_dirs_info = {}
             reg_dataset_dirs_info = {}
+            val_dataset_dirs_info = {}
             if use_dreambooth_method:
                 for subset in dataset.subsets:
-                    info = reg_dataset_dirs_info if subset.is_reg else dataset_dirs_info
+                    if subset.is_reg:
+                        info = reg_dataset_dirs_info
+                    elif subset.is_val:
+                        info = val_dataset_dirs_info
+                    else:
+                        info = dataset_dirs_info
                     info[os.path.basename(subset.image_dir)] = {"n_repeats": subset.num_repeats, "img_count": subset.img_count}
             else:
                 for subset in dataset.subsets:
@@ -1141,6 +1148,7 @@ class NetworkTrainer:
                     "ss_keep_tokens": args.keep_tokens,
                     "ss_dataset_dirs": json.dumps(dataset_dirs_info),
                     "ss_reg_dataset_dirs": json.dumps(reg_dataset_dirs_info),
+                    "ss_val_dataset_dirs": json.dumps(val_dataset_dirs_info),
                     "ss_tag_frequency": json.dumps(dataset.tag_frequency),
                     "ss_bucket_info": json.dumps(dataset.bucket_info),
                 }
