@@ -2397,7 +2397,7 @@ class ControlNetDataset(BaseDataset):
         self.num_val_images = self.dreambooth_dataset_delegate.num_val_images   
         self.is_train = is_train
         self.validation_split = float(validation_split) if validation_split is not None else 0.0
-        self.validation_seed = int(validation_seed) if validation_seed is not None else None
+        self.validation_seed = int(validation_seed) if validation_seed is not None else 23
 
         # assert all conditioning data exists
         missing_imgs = []

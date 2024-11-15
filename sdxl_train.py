@@ -6,6 +6,8 @@ import os
 from multiprocessing import Value
 from typing import List
 import toml
+import numpy as np
+import random
 
 from tqdm import tqdm
 
@@ -99,7 +101,7 @@ def append_block_lr_to_logs(block_lrs, logs, lr_scheduler, optimizer_type):
 def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args):
     total_loss = 0.0
     timesteps_list = [10, 350, 500, 650, 990]    
-    with torch.no_grad():
+    with torch.autograd.grad_mode.inference_mode(mode=True):
         if "latents" in batch and batch["latents"] is not None:
             latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
         else:
@@ -121,7 +123,7 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
             pool2 = pool2.to(accelerator.device, dtype=weight_dtype)
         else:
             input_ids1, input_ids2 = batch["input_ids_list"]
-            with torch.set_grad_enabled(False), accelerator.autocast():
+            with accelerator.autocast():
                 input_ids1 = input_ids1.to(accelerator.device)
                 input_ids2 = input_ids2.to(accelerator.device)
                 encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoding_strategy.encode_tokens(
@@ -145,7 +147,7 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
             # Sample noise
             batch_size = latents.shape[0]
             for fixed_timesteps in timesteps_list:
-                with torch.set_grad_enabled(False), accelerator.autocast():
+                with accelerator.autocast():
                     timesteps = torch.full((batch_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
                     
                     noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
@@ -198,13 +200,33 @@ def calculate_val_loss(self,
             else:
                 if epoch_step != len(train_dataloader) - 1:
                     return None, None, None
+                
+        # Get current seeds from all random number generators
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        torch_cuda_state = [torch.cuda.get_rng_state(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else None
+
+        val_Seed = int(args.validation_seed) if args.validation_seed else 23
+
+        random.seed(val_Seed)
+        np.random.seed(val_Seed)
+        torch.manual_seed(val_Seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(val_Seed)
         
     accelerator.print("Validating バリデーション処理...")
     total_loss = 0.0
     with torch.no_grad():
         validation_steps = min(int(args.max_validation_steps), len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
+        val_dataloader_seed = random.randint(global_step, 0x7FFFFFFF)
+        val_dataloader_state = random.Random(val_dataloader_seed).getstate()
         for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
+            val_original_state = random.getstate()
+            random.setstate(val_dataloader_state)
             batch = next(cyclic_val_dataloader)
+            val_dataloader_state = random.getstate()
+            random.setstate(val_original_state)
             loss = self.process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
             total_loss += loss.detach().item()
         current_val_loss = total_loss / validation_steps
@@ -212,6 +234,13 @@ def calculate_val_loss(self,
                     
     average_val_loss: float = val_loss_recorder.moving_average
     logs = {"loss/current_val_loss": current_val_loss, "loss/average_val_loss": average_val_loss}
+
+    random.setstate(python_state)
+    np.random.set_state(numpy_state)
+    torch.set_rng_state(torch_state)
+    if torch_cuda_state and torch.cuda.is_available():
+        for i, state in enumerate(torch_cuda_state):
+            torch.cuda.set_rng_state(state, i)
 
     return current_val_loss, average_val_loss, logs
 
@@ -1100,7 +1129,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validation_seed",
         type=int,
-        default=None,
+        default=23,
         help="Validation seed"
     )
     parser.add_argument(

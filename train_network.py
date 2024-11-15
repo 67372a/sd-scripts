@@ -10,6 +10,7 @@ from multiprocessing import Value
 from typing import Any, List
 import toml
 from tools.grokfast import Gradfilter_ma, Gradfilter_ema
+import numpy as np
 
 from tqdm import tqdm
 
@@ -302,7 +303,7 @@ class NetworkTrainer:
     def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
         total_loss = 0.0
         timesteps_list = [10, 350, 500, 650, 990]    
-        with torch.no_grad():
+        with torch.autograd.grad_mode.inference_mode(mode=True):
             if "latents" in batch and batch["latents"] is not None:
                 latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
             else:
@@ -334,7 +335,7 @@ class NetworkTrainer:
             if text_encoder_outputs_list is not None:
                 text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
             if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
-                with torch.set_grad_enabled(False), accelerator.autocast():
+                with accelerator.autocast():
                     # Get the text embedding for conditioning
                     if args.weighted_captions:
                         # SD only
@@ -367,7 +368,7 @@ class NetworkTrainer:
 
             batch_size = latents.shape[0]
             for fixed_timesteps in timesteps_list:
-                with torch.set_grad_enabled(False), accelerator.autocast():
+                with accelerator.autocast():
                     timesteps = torch.full((batch_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
 
                     # sample noise, call unet, get target
@@ -438,13 +439,33 @@ class NetworkTrainer:
                 else:
                     if epoch_step != len(train_dataloader) - 1:
                         return None, None, None
+                    
+        # Get current seeds from all random number generators
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        torch_cuda_state = [torch.cuda.get_rng_state(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else None
+
+        val_Seed = int(args.validation_seed) if args.validation_seed else 23
+
+        random.seed(val_Seed)
+        np.random.seed(val_Seed)
+        torch.manual_seed(val_Seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(val_Seed)
               
         accelerator.print("Validating バリデーション処理...")
         total_loss = 0.0
         with torch.no_grad():
             validation_steps = min(int(args.max_validation_steps), len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
+            val_dataloader_seed = random.randint(global_step, 0x7FFFFFFF)
+            val_dataloader_state = random.Random(val_dataloader_seed).getstate()
             for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
+                val_original_state = random.getstate()
+                random.setstate(val_dataloader_state)
                 batch = next(cyclic_val_dataloader)
+                val_dataloader_state = random.getstate()
+                random.setstate(val_original_state)
                 loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
                 total_loss += loss.detach().item()
             current_val_loss = total_loss / validation_steps
@@ -452,6 +473,13 @@ class NetworkTrainer:
                      
         average_val_loss: float = val_loss_recorder.moving_average
         logs = {"loss/current_val_loss": current_val_loss, "loss/average_val_loss": average_val_loss}
+
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if torch_cuda_state and torch.cuda.is_available():
+            for i, state in enumerate(torch_cuda_state):
+                torch.cuda.set_rng_state(state, i)
 
         return current_val_loss, average_val_loss, logs
 
@@ -2250,7 +2278,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validation_seed",
         type=int,
-        default=None,
+        default=23,
         help="Validation seed"
     )
     parser.add_argument(
