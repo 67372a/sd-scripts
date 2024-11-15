@@ -491,6 +491,13 @@ class NetworkTrainer:
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
 
+        if bool(args.disable_cuda_reduced_precision_operations) if args.disable_cuda_reduced_precision_operations else False:
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction=False
+            torch.backends.cuda.matmul.allow_tf32=False
+            torch.backends.cudnn.allow_tf32=False
+            torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
+
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
         use_user_config = args.dataset_config is not None
@@ -768,6 +775,7 @@ class NetworkTrainer:
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
+            pin_memory=bool(args.pin_data_loader_memory) if args.pin_data_loader_memory else False
         )
         
         val_dataloader = torch.utils.data.DataLoader(
@@ -777,6 +785,7 @@ class NetworkTrainer:
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
+            pin_memory=bool(args.pin_data_loader_memory) if args.pin_data_loader_memory else False
         )
 
         # 学習ステップ数を計算する
@@ -2364,6 +2373,20 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="A raw multipler to apply to loss.",
+    )
+
+    parser.add_argument(
+        "--disable_cuda_reduced_precision_operations",
+        type=bool,
+        default=False,
+        help="Disables reduced precision for bf16, fp16, and disables use of tf32 to maximize precision at a tiny cost to performance.",
+    )
+
+    parser.add_argument(
+        "--pin_data_loader_memory",
+        type=bool,
+        default=False,
+        help="Pins dataloader memory, may speed up dataloader operations.",
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
