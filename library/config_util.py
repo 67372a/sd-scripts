@@ -496,7 +496,6 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                 subset_blueprint.params.caption_dropout_every_n_epochs = 0
                 subset_blueprint.params.caption_tag_dropout_rate = 0.0
                 subset_blueprint.params.token_warmup_step = 0
-                subset_blueprint.params.shuffle_caption = False
 
                 val_subsets.append(subset_klass(**asdict(subset_blueprint.params)))
             else:
