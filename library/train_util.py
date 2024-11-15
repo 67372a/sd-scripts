@@ -5855,9 +5855,13 @@ def save_sd_model_on_epoch_end_or_stepwise_common(
                 remove_ckpt_name = get_step_ckpt_name(args, ext, remove_no)
 
             remove_ckpt_file = os.path.join(args.output_dir, remove_ckpt_name)
-            if os.path.exists(remove_ckpt_file):
-                logger.info(f"removing old checkpoint: {remove_ckpt_file}")
-                os.remove(remove_ckpt_file)
+
+            try:
+                if os.path.exists(remove_ckpt_file):
+                    logger.info(f"removing old checkpoint: {remove_ckpt_file}")
+                    os.remove(remove_ckpt_file)
+            except Exception as e:
+                logger.warning(f"Failed to remove old checkpoint: {remove_ckpt_file}. Due to: {e}")
 
     else:
         if on_epoch_end:
@@ -5879,9 +5883,12 @@ def save_sd_model_on_epoch_end_or_stepwise_common(
             else:
                 remove_out_dir = os.path.join(args.output_dir, STEP_DIFFUSERS_DIR_NAME.format(model_name, remove_no))
 
-            if os.path.exists(remove_out_dir):
-                logger.info(f"removing old model: {remove_out_dir}")
-                shutil.rmtree(remove_out_dir)
+            try:
+                if os.path.exists(remove_ckpt_file):
+                    logger.info(f"removing old model: {remove_out_dir}")
+                    shutil.rmtree(remove_out_dir)
+            except Exception as e:
+                logger.warning(f"Failed to remove old model: {remove_out_dir}. Due to: {e}")
 
     if args.save_state:
         if on_epoch_end:
@@ -5907,9 +5914,12 @@ def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator, ep
     if last_n_epochs is not None:
         remove_epoch_no = epoch_no - args.save_every_n_epochs * last_n_epochs
         state_dir_old = os.path.join(args.output_dir, EPOCH_STATE_NAME.format(model_name, remove_epoch_no))
-        if os.path.exists(state_dir_old):
-            logger.info(f"removing old state: {state_dir_old}")
-            shutil.rmtree(state_dir_old)
+        try:
+            if os.path.exists(state_dir_old):
+                logger.info(f"removing old state: {state_dir_old}")
+                shutil.rmtree(state_dir_old)
+        except Exception as e:
+            logger.warning(f"Failed to remove old state: {state_dir_old}. Due to: {e}")
 
 
 def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator, step_no):
@@ -5933,9 +5943,12 @@ def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator, step_n
 
         if remove_step_no > 0:
             state_dir_old = os.path.join(args.output_dir, STEP_STATE_NAME.format(model_name, remove_step_no))
-            if os.path.exists(state_dir_old):
-                logger.info(f"removing old state: {state_dir_old}")
-                shutil.rmtree(state_dir_old)
+            try:
+                if os.path.exists(state_dir_old):
+                    logger.info(f"removing old state: {state_dir_old}")
+                    shutil.rmtree(state_dir_old)
+            except Exception as e:
+                logger.warning(f"Failed to remove old state: {state_dir_old}. Due to: {e}")
 
 
 def save_state_on_train_end(args: argparse.Namespace, accelerator):
