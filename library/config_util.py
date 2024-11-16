@@ -56,7 +56,7 @@ class BaseSubsetParams:
     image_dir: Optional[str] = None
     num_repeats: int = 1
     shuffle_caption: bool = False
-    shuffle_caption_sigma: float = 0.0
+    shuffle_caption_sigma: int = 0
     caption_separator: str = (",",)
     keep_tokens: int = 0
     keep_tokens_separator: str = (None,)
@@ -185,7 +185,7 @@ class ConfigSanitizer:
         "num_repeats": int,
         "random_crop": bool,
         "shuffle_caption": bool,
-        "shuffle_caption_sigma": float,
+        "shuffle_caption_sigma": int,
         "keep_tokens": int,
         "keep_tokens_separator": str,
         "secondary_separator": str,

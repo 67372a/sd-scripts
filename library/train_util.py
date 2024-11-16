@@ -395,7 +395,7 @@ class BaseSubset:
         alpha_mask: Optional[bool],
         num_repeats: int,
         shuffle_caption: bool,
-        shuffle_caption_sigma: float,
+        shuffle_caption_sigma: int,
         caption_separator: str,
         keep_tokens: int,
         keep_tokens_separator: str,
