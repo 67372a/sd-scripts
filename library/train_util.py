@@ -868,7 +868,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     temp = []
                     for i in range(flex_tokens_len):
                         # Generate a random number from a normal distribution centered at zero
-                        r = random.gauss(0, flex_tokens_len / subset.shuffle_caption_sigma)
+                        r = random.gauss(0, subset.shuffle_caption_sigma)
                         # Compute a tentative new position by adding the random number to the original index
                         p = i + r
                         temp.append((p, flex_tokens[i]))
