@@ -56,6 +56,7 @@ class BaseSubsetParams:
     image_dir: Optional[str] = None
     num_repeats: int = 1
     shuffle_caption: bool = False
+    shuffle_caption_sigma: float = 0.0
     caption_separator: str = (",",)
     keep_tokens: int = 0
     keep_tokens_separator: str = (None,)
@@ -184,6 +185,7 @@ class ConfigSanitizer:
         "num_repeats": int,
         "random_crop": bool,
         "shuffle_caption": bool,
+        "shuffle_caption_sigma": float,
         "keep_tokens": int,
         "keep_tokens_separator": str,
         "secondary_separator": str,
@@ -586,6 +588,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
           image_count: {subset.img_count}
           num_repeats: {subset.num_repeats}
           shuffle_caption: {subset.shuffle_caption}
+          shuffle_caption_sigma: {subset.shuffle_caption_sigma}
           keep_tokens: {subset.keep_tokens}
           keep_tokens_separator: {subset.keep_tokens_separator}
           caption_separator: {subset.caption_separator}
@@ -671,6 +674,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
           image_dir: "{subset.image_dir}"
           image_count: {subset.img_count}
           shuffle_caption: {subset.shuffle_caption}
+          shuffle_caption_sigma: {subset.shuffle_caption_sigma}
           keep_tokens: {subset.keep_tokens}
           keep_tokens_separator: {subset.keep_tokens_separator}
           caption_prefix: {subset.caption_prefix}

@@ -395,6 +395,7 @@ class BaseSubset:
         alpha_mask: Optional[bool],
         num_repeats: int,
         shuffle_caption: bool,
+        shuffle_caption_sigma: float,
         caption_separator: str,
         keep_tokens: int,
         keep_tokens_separator: str,
@@ -417,6 +418,7 @@ class BaseSubset:
         self.alpha_mask = alpha_mask if alpha_mask is not None else False
         self.num_repeats = num_repeats
         self.shuffle_caption = shuffle_caption
+        self.shuffle_caption_sigma = shuffle_caption_sigma
         self.caption_separator = caption_separator
         self.keep_tokens = keep_tokens
         self.keep_tokens_separator = keep_tokens_separator
@@ -452,6 +454,7 @@ class DreamBoothSubset(BaseSubset):
         alpha_mask: bool,
         num_repeats,
         shuffle_caption,
+        shuffle_caption_sigma,
         caption_separator: str,
         keep_tokens,
         keep_tokens_separator,
@@ -477,6 +480,7 @@ class DreamBoothSubset(BaseSubset):
             alpha_mask,
             num_repeats,
             shuffle_caption,
+            shuffle_caption_sigma,
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
@@ -518,6 +522,7 @@ class FineTuningSubset(BaseSubset):
         alpha_mask: bool,
         num_repeats,
         shuffle_caption,
+        shuffle_caption_sigma,
         caption_separator,
         keep_tokens,
         keep_tokens_separator,
@@ -543,6 +548,7 @@ class FineTuningSubset(BaseSubset):
             alpha_mask,
             num_repeats,
             shuffle_caption,
+            shuffle_caption_sigma,
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
@@ -579,6 +585,7 @@ class ControlNetSubset(BaseSubset):
         cache_info: bool,
         num_repeats,
         shuffle_caption,
+        shuffle_caption_sigma,
         caption_separator,
         keep_tokens,
         keep_tokens_separator,
@@ -604,6 +611,7 @@ class ControlNetSubset(BaseSubset):
             False,  # alpha_mask
             num_repeats,
             shuffle_caption,
+            shuffle_caption_sigma,
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
@@ -855,7 +863,20 @@ class BaseDataset(torch.utils.data.Dataset):
                             l.append(token)
                     return l
 
-                if subset.shuffle_caption:
+                if subset.shuffle_caption and subset.shuffle_caption_sigma > 0:
+                    flex_tokens_len = len(flex_tokens)
+                    temp = []
+                    for i in range(flex_tokens_len):
+                        # Generate a random number from a normal distribution centered at zero
+                        r = random.gauss(0, flex_tokens_len / subset.shuffle_caption_sigma)
+                        # Compute a tentative new position by adding the random number to the original index
+                        p = i + r
+                        temp.append((p, flex_tokens[i]))
+                    # Sort the list of tuples based on the tentative positions
+                    temp.sort(key=lambda x: x[0])
+                    # Extract the elements to create the shuffled array
+                    flex_tokens = [x[1] for x in temp]
+                elif subset.shuffle_caption:
                     random.shuffle(flex_tokens)
 
                 flex_tokens = dropout_tags(flex_tokens)
@@ -2353,6 +2374,7 @@ class ControlNetDataset(BaseDataset):
                 False,
                 subset.num_repeats,
                 subset.shuffle_caption,
+                subset.shuffle_caption_sigma,
                 subset.caption_separator,
                 subset.keep_tokens,
                 subset.keep_tokens_separator,
