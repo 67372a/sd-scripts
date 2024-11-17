@@ -1,5 +1,6 @@
 # training with captions
 
+import importlib
 import argparse
 import math
 import os
@@ -8,6 +9,9 @@ from typing import List
 import toml
 import numpy as np
 import random
+import tools.edm2_loss
+import ast
+
 
 from tqdm import tqdm
 
@@ -250,6 +254,13 @@ def train(args):
     sdxl_train_util.verify_sdxl_training_args(args)
     deepspeed_utils.prepare_deepspeed_args(args)
     setup_logging(args, reset=True)
+
+    if bool(args.disable_cuda_reduced_precision_operations) if args.disable_cuda_reduced_precision_operations else False:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction=False
+        torch.backends.cuda.matmul.allow_tf32=False
+        torch.backends.cudnn.allow_tf32=False
+        torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
 
     assert (
         not args.weighted_captions or not args.cache_text_encoder_outputs
@@ -589,6 +600,7 @@ def train(args):
         collate_fn=collator,
         num_workers=n_workers,
         persistent_workers=args.persistent_data_loader_workers,
+        pin_memory=bool(args.pin_data_loader_memory) if args.pin_data_loader_memory else False
     )
 
     val_dataloader = torch.utils.data.DataLoader(
@@ -598,6 +610,7 @@ def train(args):
         collate_fn=collator,
         num_workers=n_workers,
         persistent_workers=args.persistent_data_loader_workers,
+        pin_memory=bool(args.pin_data_loader_memory) if args.pin_data_loader_memory else False
     )
 
     # 学習ステップ数を計算する
@@ -774,6 +787,20 @@ def train(args):
     if args.zero_terminal_snr:
         custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
+        if args.edm2_loss_weighting:
+            values = args.edm2_loss_weighting_optimizer.split(".")
+            optimizer_module = importlib.import_module(".".join(values[:-1]))
+            case_sensitive_optimizer_type = values[-1]
+            opti_args = ast.literal_eval(args.edm2_loss_weighting_optimizer_args)
+            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 2.5e-2
+
+            edm2_weighting = tools.edm2_loss.EDM2WeightingWrapper(noise_scheduler=noise_scheduler,
+                                                                  optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
+                                                                  lr=opti_lr,
+                                                                  optimizer_args=opti_args,
+                                                                  device=accelerator.device)
+            accelerator.register_for_checkpointing(edm2_weighting)
+
     if accelerator.is_main_process:
         init_kwargs = {}
         if args.wandb_run_name:
@@ -895,6 +922,7 @@ def train(args):
                     or args.v_pred_like_loss
                     or args.debiased_estimation_loss
                     or args.masked_loss
+                    or args.edm2_loss_weighting
                 ):
                     # do not mean over batch dimension for snr weight or scale v-pred loss
                     loss = train_util.conditional_loss(
@@ -912,6 +940,12 @@ def train(args):
                         loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                    if args.edm2_loss_weighting:
+                        loss = edm2_weighting(loss, timesteps)
+
+                    if args.loss_multipler:
+                        loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                     loss = loss.mean()  # mean over batch dimension
                 else:
@@ -1150,6 +1184,59 @@ def setup_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of max validation steps for counting validation loss. By default, validation will run entire validation dataset"
     )    
+
+    parser.add_argument(
+        "--disable_cuda_reduced_precision_operations",
+        action="store_true",
+        help="Disables reduced precision for bf16, fp16, and disables use of tf32 to maximize precision at a tiny cost to performance.",
+    )
+
+    parser.add_argument(
+        "--pin_data_loader_memory",
+        action="store_true",
+        help="Pins dataloader memory, may speed up dataloader operations.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting",
+        action="store_true",
+        help="Use EDM2 loss weighting.",
+    )
+
+    parser.add_argument(
+        "--loss_multipler",
+        type=float,
+        default=1.0,
+        help="A raw multipler to apply to loss.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting",
+        action="store_true",
+        help="Use EDM2 loss weighting.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_optimizer",
+        type=str,
+        default="schedulefree.adamw_schedulefree.AdamWScheduleFree",
+        help="Fully qualified optimizer class name to use with the edm2 loss weighting optimizer.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_optimizer_lr",
+        type=float,
+        default=2.5e-2,
+        help="Learning rate as a float for the edm2 loss weighting optimizer.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_optimizer_args",
+        type=str,
+        default=r"{'weight_decay':0}",
+        help="A JSON object as a string of optimizer args for the edm2 loss weighting optimizer.",
+    )
+
     return parser
 
 

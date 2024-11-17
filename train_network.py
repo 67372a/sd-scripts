@@ -11,6 +11,8 @@ from typing import Any, List
 import toml
 from tools.grokfast import Gradfilter_ma, Gradfilter_ema
 import numpy as np
+import tools.edm2_loss
+import ast
 
 from tqdm import tqdm
 
@@ -1292,6 +1294,20 @@ class NetworkTrainer:
 
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
 
+        if args.edm2_loss_weighting:
+            values = args.edm2_loss_weighting_optimizer.split(".")
+            optimizer_module = importlib.import_module(".".join(values[:-1]))
+            case_sensitive_optimizer_type = values[-1]
+            opti_args = ast.literal_eval(args.edm2_loss_weighting_optimizer_args)
+            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 2.5e-2
+
+            edm2_weighting = tools.edm2_loss.EDM2WeightingWrapper(noise_scheduler=noise_scheduler,
+                                                                  optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
+                                                                  lr=opti_lr,
+                                                                  optimizer_args=opti_args,
+                                                                  device=accelerator.device)
+            accelerator.register_for_checkpointing(edm2_weighting)
+
         if accelerator.is_main_process:
             init_kwargs = {}
             if args.wandb_run_name:
@@ -1530,8 +1546,11 @@ class NetworkTrainer:
                             loss_weights = batch["loss_weights"]  # Sample-wise weights
                             loss = loss * loss_weights
 
-                            # Post-process loss
-                            loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                            if args.edm2_loss_weighting:
+                                loss = edm2_weighting(loss, timesteps)
+
+                            if args.loss_multipler:
+                                loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                             loss = loss.mean()  # Mean over batch
 
@@ -1648,6 +1667,12 @@ class NetworkTrainer:
                         # Post-process loss
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
+                        if args.edm2_loss_weighting:
+                            loss = edm2_weighting(loss, timesteps)
+
+                        if args.loss_multipler:
+                            loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
                         loss = loss.mean()  # Mean over batch
 
                         # Divide loss by iter_size to average over accumulated steps
@@ -1724,6 +1749,9 @@ class NetworkTrainer:
                                         # Post-process loss if needed
                                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
+                                        if args.edm2_loss_weighting:
+                                            loss = edm2_weighting(loss, timesteps)
+
                                         if args.loss_multipler:
                                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
@@ -1767,6 +1795,9 @@ class NetworkTrainer:
 
                                     # Post-process loss if needed
                                     loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                                    if args.edm2_loss_weighting:
+                                        loss = edm2_weighting(loss, timesteps)
 
                                     if args.loss_multipler:
                                         loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
@@ -1857,6 +1888,10 @@ class NetworkTrainer:
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                if args.edm2_loss_weighting:
+                                    os.makedirs(args.output_dir, exist_ok=True)
+                                    loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
+                                    edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{global_step + 1}.sft")
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.save_state:
@@ -1905,6 +1940,10 @@ class NetworkTrainer:
                     saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                     if is_main_process and saving:
                         ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        if args.edm2_loss_weighting:
+                            os.makedirs(args.output_dir, exist_ok=True)
+                            loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
+                            edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{epoch + 1}.sft")
                         save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
                         remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
@@ -2039,6 +2078,9 @@ class NetworkTrainer:
                         # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
+                        if args.edm2_loss_weighting:
+                            loss = edm2_weighting(loss, timesteps)
+
                         if args.loss_multipler:
                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
@@ -2102,6 +2144,10 @@ class NetworkTrainer:
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                if args.edm2_loss_weighting:
+                                    os.makedirs(args.output_dir, exist_ok=True)
+                                    loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
+                                    edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{global_step + 1}.sft")
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.save_state:
@@ -2150,6 +2196,10 @@ class NetworkTrainer:
                     saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                     if is_main_process and saving:
                         ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        if args.edm2_loss_weighting:
+                            os.makedirs(args.output_dir, exist_ok=True)
+                            loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
+                            edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{epoch + 1}.sft")
                         save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
                         remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
@@ -2397,23 +2447,47 @@ def setup_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--disable_cuda_reduced_precision_operations",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Disables reduced precision for bf16, fp16, and disables use of tf32 to maximize precision at a tiny cost to performance.",
     )
 
     parser.add_argument(
         "--pin_data_loader_memory",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Pins dataloader memory, may speed up dataloader operations.",
     )
 
     parser.add_argument(
         "--train_network_norm_modules_as_float32",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Trains network norm layers as float32, slight reduction in processing speed, possible minor benefit from greater precision.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting",
+        action="store_true",
+        help="Use EDM2 loss weighting.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_optimizer",
+        type=str,
+        default="schedulefree.adamw_schedulefree.AdamWScheduleFree",
+        help="Fully qualified optimizer class name to use with the edm2 loss weighting optimizer.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_optimizer_lr",
+        type=float,
+        default=2.5e-2,
+        help="Learning rate as a float for the edm2 loss weighting optimizer.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_optimizer_args",
+        type=str,
+        default=r"{'weight_decay':0}",
+        help="A JSON object as a string of optimizer args for the edm2 loss weighting optimizer.",
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
