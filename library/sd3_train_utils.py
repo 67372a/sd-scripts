@@ -665,6 +665,8 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         self.sigma_min = self.sigmas[-1].item()
         self.sigma_max = self.sigmas[0].item()
 
+        self.alphas_cumprod = 1 / (self.sigmas ** 2 + 1)
+
     @property
     def step_index(self):
         """
