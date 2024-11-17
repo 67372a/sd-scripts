@@ -2472,14 +2472,14 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_optimizer",
         type=str,
-        default="schedulefree.adamw_schedulefree.AdamWScheduleFree",
+        default="torch.optim.AdamW",
         help="Fully qualified optimizer class name to use with the edm2 loss weighting optimizer.",
     )
 
     parser.add_argument(
         "--edm2_loss_weighting_optimizer_lr",
         type=float,
-        default=2.5e-2,
+        default=5e-3,
         help="Learning rate as a float for the edm2 loss weighting optimizer.",
     )
 
