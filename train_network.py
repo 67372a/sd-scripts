@@ -1314,7 +1314,7 @@ class NetworkTrainer:
             #                                                      lr=opti_lr,
             #                                                      optimizer_args=opti_args,
             #                                                      device=accelerator.device)
-            accelerator.prepare(lossweightMLP, MLP_optim)
+            lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
 
         if accelerator.is_main_process:
             init_kwargs = {}
