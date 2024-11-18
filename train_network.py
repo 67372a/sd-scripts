@@ -11,7 +11,6 @@ from typing import Any, List
 import toml
 from tools.grokfast import Gradfilter_ma, Gradfilter_ema
 import numpy as np
-import tools.edm2_loss
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
 
@@ -74,8 +73,14 @@ class NetworkTrainer:
         grad_norm_clipped=None,
         current_val_loss=None,
         average_val_loss=None,
+        current_loss_scaled=None,
+        average_loss_scaled=None,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
+
+        if current_loss_scaled is not None:
+            logs["loss/current_scaled"] = current_loss_scaled
+            logs["loss/average_scaled"] = average_loss_scaled
 
         if grad_norm is not None:
             logs["train/grad_norm"] = grad_norm
@@ -1302,7 +1307,7 @@ class NetworkTrainer:
             optimizer_module = importlib.import_module(".".join(values[:-1]))
             case_sensitive_optimizer_type = values[-1]
             opti_args = ast.literal_eval(args.edm2_loss_weighting_optimizer_args)
-            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 2.5e-2
+            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 1e-2
 
             lossweightMLP, MLP_optim = edm2_loss_mm.create_weight_MLP(noise_scheduler,
                                                                       optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
@@ -1330,6 +1335,9 @@ class NetworkTrainer:
 
         loss_recorder = train_util.LossRecorder()
         val_loss_recorder = train_util.LossRecorder()
+
+        if args.edm2_loss_weighting:
+            loss_scaled_recorder = train_util.LossRecorder()
         
         del train_dataset_group
 
@@ -1458,7 +1466,7 @@ class NetworkTrainer:
                     sync_gradients = (accumulation_counter + 1) % iter_size == 0 or (step + 1 == len(skipped_dataloader or train_dataloader))
 
                     effective_batch_size = accumulation_counter + 1 if sync_gradients else iter_size
-                    loss_scaling = 1.0 / effective_batch_size
+                    grad_accum_loss_scaling = 1.0 / effective_batch_size
 
                     # Prevent gradient synchronization during accumulation steps in distributed settings
                     if not sync_gradients and accelerator.num_processes > 1:
@@ -1556,15 +1564,16 @@ class NetworkTrainer:
 
                             if args.edm2_loss_weighting:
                                 loss, loss_scaled = lossweightMLP(loss, timesteps)
-                                #loss = edm2_weighting(loss, timesteps)
 
                             if args.loss_multipler:
                                 loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                             loss = loss.mean()  # Mean over batch
+                            loss_scaled = loss_scaled.mean()
 
                             # Divide loss by iter_size to average over accumulated steps
-                            loss = loss * loss_scaling
+                            loss = loss * grad_accum_loss_scaling
+                            loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                             # Backward pass
                             accelerator.backward(loss)
@@ -1683,10 +1692,12 @@ class NetworkTrainer:
                         if args.loss_multipler:
                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
-                        loss = loss.mean()  # Mean over batch
+                        loss = loss.mean()  # Average over batch
+                        loss_scaled = loss_scaled.mean()
 
                         # Divide loss by iter_size to average over accumulated steps
-                        loss = loss * loss_scaling
+                        loss = loss * grad_accum_loss_scaling
+                        loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                         # Backward pass
                         accelerator.backward(loss)
@@ -1761,15 +1772,16 @@ class NetworkTrainer:
 
                                         if args.edm2_loss_weighting:
                                             loss, loss_scaled = lossweightMLP(loss, timesteps)
-                                            #loss = edm2_weighting(loss, timesteps)
 
                                         if args.loss_multipler:
                                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                                         loss = loss.mean()  # Average over batch
+                                        loss_scaled = loss_scaled.mean()
 
                                         # Divide loss by iter_size to average over accumulated steps
-                                        loss = loss * loss_scaling
+                                        loss = loss * grad_accum_loss_scaling
+                                        loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                                         # Accumulate total loss
                                         total_loss += loss.detach()
@@ -1809,12 +1821,16 @@ class NetworkTrainer:
 
                                     if args.edm2_loss_weighting:
                                         loss, loss_scaled = lossweightMLP(loss, timesteps)
-                                        #loss = edm2_weighting(loss, timesteps)
 
                                     if args.loss_multipler:
                                         loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
                                     loss = loss.mean()  # Average over batch
+                                    loss_scaled = loss_scaled.mean()
+
+                                    # Divide loss by iter_size to average over accumulated steps
+                                    loss = loss * grad_accum_loss_scaling
+                                    loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                                     # Divide loss by iter_size to average over accumulated steps
                                     loss = loss / len(batch_data_list)
@@ -1915,8 +1931,13 @@ class NetworkTrainer:
                                     remove_model(remove_ckpt_name)
                         optimizer_train_fn()
 
-                    current_loss = loss.detach().item() / loss_scaling  # Multiply back since we divided earlier
+                    current_loss = loss.detach().item() / grad_accum_loss_scaling  # Multiply back since we divided earlier
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    if args.edm2_loss_weighting:
+                        current_loss_scaled = loss_scaled.detach().item() / grad_accum_loss_scaling
+                        loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
+                        average_loss_scaled: float = loss_scaled_recorder.moving_average
+
                     avr_loss: float = loss_recorder.moving_average
                     logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
@@ -1924,6 +1945,9 @@ class NetworkTrainer:
                         logs = {**max_mean_logs, **logs}
 
                     progress_bar.set_postfix(**logs)
+
+                    if args.edm2_loss_weighting:
+                        logs = {"avg_loss_scaled": average_loss_scaled, **logs}
 
                     if val_logs:
                         logs = {**val_logs, **logs}
@@ -1933,7 +1957,7 @@ class NetworkTrainer:
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled
                         )
                         accelerator.log(logs, step=global_step)
                                             
@@ -2092,12 +2116,12 @@ class NetworkTrainer:
 
                         if args.edm2_loss_weighting:
                             loss, loss_scaled = lossweightMLP(loss, timesteps)
-                            #loss = edm2_weighting(loss, timesteps)
 
                         if args.loss_multipler:
                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
-                        loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                        loss = loss.mean()  # Mean over batch
+                        loss_scaled = loss_scaled.mean()
                         
                         accelerator.backward(loss)
 
@@ -2181,6 +2205,10 @@ class NetworkTrainer:
 
                     current_loss = loss.detach().item()
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    if args.edm2_loss_weighting:
+                        current_loss_scaled = loss_scaled.detach().item()
+                        loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
+                        average_loss_scaled: float = loss_scaled_recorder.moving_average
                     avr_loss: float = loss_recorder.moving_average
                     logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
@@ -2188,6 +2216,9 @@ class NetworkTrainer:
                         logs = {**max_mean_logs, **logs}
 
                     progress_bar.set_postfix(**logs)
+
+                    if args.edm2_loss_weighting:
+                        logs = {"avg_loss_scaled": average_loss_scaled, **logs}
 
                     if val_logs:
                         logs = {**val_logs, **logs}
@@ -2197,7 +2228,7 @@ class NetworkTrainer:
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled
                         )
                         accelerator.log(logs, step=global_step)
                                             
