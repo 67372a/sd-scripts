@@ -9,7 +9,7 @@ from typing import List
 import toml
 import numpy as np
 import random
-import tools.edm2_loss
+import tools.edm2_loss_mm
 import ast
 
 
@@ -792,14 +792,13 @@ def train(args):
             optimizer_module = importlib.import_module(".".join(values[:-1]))
             case_sensitive_optimizer_type = values[-1]
             opti_args = ast.literal_eval(args.edm2_loss_weighting_optimizer_args)
-            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 2.5e-2
+            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 1e-2
 
-            edm2_weighting = tools.edm2_loss.EDM2WeightingWrapper(noise_scheduler=noise_scheduler,
-                                                                  optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
-                                                                  lr=opti_lr,
-                                                                  optimizer_args=opti_args,
-                                                                  device=accelerator.device)
-            accelerator.register_for_checkpointing(edm2_weighting)
+            lossweightMLP, MLP_optim = edm2_loss_mm.create_weight_MLP(noise_scheduler,
+                                                                      optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
+                                                                      lr=opti_lr,
+                                                                      optimizer_args=opti_args)
+            lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
 
     if accelerator.is_main_process:
         init_kwargs = {}
@@ -827,6 +826,10 @@ def train(args):
 
     loss_recorder = train_util.LossRecorder()
     val_loss_recorder = train_util.LossRecorder()
+
+    if args.edm2_loss_weighting:
+        loss_scaled_recorder = train_util.LossRecorder()
+
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
         current_epoch.value = epoch + 1
@@ -840,7 +843,7 @@ def train(args):
             if args.fused_optimizer_groups:
                 optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
 
-            with accelerator.accumulate(*training_models):
+            with accelerator.accumulate(*training_models, lossweightMLP) if args.edm2_loss_weighting else accelerator.accumulate(*training_models):
                 if "latents" in batch and batch["latents"] is not None:
                     latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                 else:
@@ -922,6 +925,7 @@ def train(args):
                     or args.v_pred_like_loss
                     or args.debiased_estimation_loss
                     or args.masked_loss
+                    or args.loss_multipler
                     or args.edm2_loss_weighting
                 ):
                     # do not mean over batch dimension for snr weight or scale v-pred loss
@@ -942,12 +946,13 @@ def train(args):
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
                     if args.edm2_loss_weighting:
-                        loss = edm2_weighting(loss, timesteps)
+                        loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                     if args.loss_multipler:
                         loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
 
-                    loss = loss.mean()  # mean over batch dimension
+                    loss = loss.mean()  # Mean over batch
+                    loss_scaled = loss_scaled.mean()
                 else:
                     loss = train_util.conditional_loss(
                         noise_pred.float(), target.float(), reduction="mean", loss_type=args.loss_type, huber_c=huber_c
@@ -963,8 +968,15 @@ def train(args):
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                     optimizer.step()
+
+                    if args.edm2_loss_weighting:
+                        MLP_optim.step()
+
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+
+                    if args.edm2_loss_weighting:
+                        MLP_optim.zero_grad(set_to_none=True)
                 else:
                     # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
                     lr_scheduler.step()
@@ -1018,6 +1030,10 @@ def train(args):
 
             current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+            if args.edm2_loss_weighting:
+                current_loss_scaled = loss_scaled.detach().item()
+                loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
+                average_loss_scaled: float = loss_scaled_recorder.moving_average
             avr_loss: float = loss_recorder.moving_average
             logs = {"loss": current_loss, "avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
@@ -1025,6 +1041,9 @@ def train(args):
 
             if val_logs:
                 logs = {**val_logs, **logs}
+                
+            if args.edm2_loss_weighting:
+                logs = {"loss/current_loss_scaled": current_val_loss, "loss/average_scaled": average_loss_scaled, **logs}
 
             if len(accelerator.trackers) > 0:
                 if block_lrs is None:
@@ -1226,7 +1245,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_optimizer_lr",
         type=float,
-        default=5e-3,
+        default=1e-3,
         help="Learning rate as a float for the edm2 loss weighting optimizer.",
     )
 

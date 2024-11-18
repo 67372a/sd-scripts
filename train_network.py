@@ -1313,12 +1313,6 @@ class NetworkTrainer:
                                                                       optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
                                                                       lr=opti_lr,
                                                                       optimizer_args=opti_args)
-
-            #edm2_weighting = tools.edm2_loss.EDM2WeightingWrapper(noise_scheduler=noise_scheduler,
-            #                                                      optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
-            #                                                      lr=opti_lr,
-            #                                                      optimizer_args=opti_args,
-            #                                                      device=accelerator.device)
             lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
 
         if accelerator.is_main_process:
@@ -1687,7 +1681,6 @@ class NetworkTrainer:
 
                         if args.edm2_loss_weighting:
                             loss, loss_scaled = lossweightMLP(loss, timesteps)
-                            #loss = edm2_weighting(loss, timesteps)
 
                         if args.loss_multipler:
                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
@@ -1916,10 +1909,6 @@ class NetworkTrainer:
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                                if args.edm2_loss_weighting:
-                                    os.makedirs(args.output_dir, exist_ok=True)
-                                    loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
-                                    #edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{global_step + 1}.sft")
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.save_state:
@@ -1976,10 +1965,6 @@ class NetworkTrainer:
                     saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                     if is_main_process and saving:
                         ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                        if args.edm2_loss_weighting:
-                            os.makedirs(args.output_dir, exist_ok=True)
-                            loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
-                            #edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{epoch + 1}.sft")
                         save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
                         remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
@@ -2188,10 +2173,6 @@ class NetworkTrainer:
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                                if args.edm2_loss_weighting:
-                                    os.makedirs(args.output_dir, exist_ok=True)
-                                    loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
-                                    #edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{global_step + 1}.sft")
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.save_state:
@@ -2247,10 +2228,6 @@ class NetworkTrainer:
                     saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                     if is_main_process and saving:
                         ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                        if args.edm2_loss_weighting:
-                            os.makedirs(args.output_dir, exist_ok=True)
-                            loss_ckpt_file = os.path.join(args.output_dir, ckpt_name)
-                            #edm2_weighting.save_model(f"{loss_ckpt_file}-learned-loss-weights-{epoch + 1}.sft")
                         save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
                         remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
