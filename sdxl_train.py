@@ -1041,7 +1041,7 @@ def train(args):
 
             if val_logs:
                 logs = {**val_logs, **logs}
-                
+
             if args.edm2_loss_weighting:
                 logs = {"loss/current_loss_scaled": current_val_loss, "loss/average_scaled": average_loss_scaled, **logs}
 
@@ -1245,7 +1245,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_optimizer_lr",
         type=float,
-        default=1e-3,
+        default=1e-2,
         help="Learning rate as a float for the edm2 loss weighting optimizer.",
     )
 
