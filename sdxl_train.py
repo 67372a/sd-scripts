@@ -945,11 +945,14 @@ def train(args):
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
-                    if args.edm2_loss_weighting:
-                        loss, loss_scaled = lossweightMLP(loss, timesteps)
-
                     if args.loss_multipler:
                         loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
+                    # For logging
+                    pre_scaling_loss = loss.mean()
+
+                    if args.edm2_loss_weighting:
+                        loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                     loss = loss.mean()  # Mean over batch
                     loss_scaled = loss_scaled.mean()
@@ -957,8 +960,11 @@ def train(args):
                     loss = train_util.conditional_loss(
                         noise_pred.float(), target.float(), reduction="mean", loss_type=args.loss_type, huber_c=huber_c
                     )
+                    pre_scaling_loss = loss
 
                 accelerator.backward(loss)
+
+                loss = pre_scaling_loss
 
                 if not (args.fused_backward_pass or args.fused_optimizer_groups):
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:

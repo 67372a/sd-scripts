@@ -1556,11 +1556,14 @@ class NetworkTrainer:
                             loss_weights = batch["loss_weights"]  # Sample-wise weights
                             loss = loss * loss_weights
 
-                            if args.edm2_loss_weighting:
-                                loss, loss_scaled = lossweightMLP(loss, timesteps)
-
                             if args.loss_multipler:
                                 loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
+                            # For logging
+                            pre_scaling_loss = loss.mean() * grad_accum_loss_scaling
+
+                            if args.edm2_loss_weighting:
+                                loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                             loss = loss.mean()  # Mean over batch
                             loss_scaled = loss_scaled.mean()
@@ -1571,6 +1574,8 @@ class NetworkTrainer:
 
                             # Backward pass
                             accelerator.backward(loss)
+
+                            loss = pre_scaling_loss * grad_accum_loss_scaling
 
                             # Collect necessary data for recomputation during second step
                             batch_data_list.append({
@@ -1679,11 +1684,14 @@ class NetworkTrainer:
                         # Post-process loss
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                        if args.edm2_loss_weighting:
-                            loss, loss_scaled = lossweightMLP(loss, timesteps)
-
                         if args.loss_multipler:
                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
+                        # For logging
+                        pre_scaling_loss = loss.mean()
+
+                        if args.edm2_loss_weighting:
+                            loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                         loss = loss.mean()  # Average over batch
                         loss_scaled = loss_scaled.mean()
@@ -1694,6 +1702,8 @@ class NetworkTrainer:
 
                         # Backward pass
                         accelerator.backward(loss)
+
+                        loss = pre_scaling_loss * grad_accum_loss_scaling
 
                         # Collect necessary data for recomputation during second step
                         batch_data_list.append({
@@ -1763,11 +1773,14 @@ class NetworkTrainer:
                                         # Post-process loss if needed
                                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                                        if args.edm2_loss_weighting:
-                                            loss, loss_scaled = lossweightMLP(loss, timesteps)
-
                                         if args.loss_multipler:
                                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
+                                        # For logging
+                                        pre_scaling_loss = loss.mean()
+
+                                        if args.edm2_loss_weighting:
+                                            loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                                         loss = loss.mean()  # Average over batch
                                         loss_scaled = loss_scaled.mean()
@@ -1776,11 +1789,13 @@ class NetworkTrainer:
                                         loss = loss * grad_accum_loss_scaling
                                         loss_scaled = loss_scaled * grad_accum_loss_scaling
 
-                                        # Accumulate total loss
-                                        total_loss += loss.detach()
-
                                         # Backward pass
                                         accelerator.backward(loss)
+
+                                        loss = pre_scaling_loss * grad_accum_loss_scaling
+
+                                        # Accumulate total loss
+                                        total_loss += loss.detach()
                                 else:
                                     # Predict the noise residual
                                     with accelerator.autocast():
@@ -1812,11 +1827,14 @@ class NetworkTrainer:
                                     # Post-process loss if needed
                                     loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                                    if args.edm2_loss_weighting:
-                                        loss, loss_scaled = lossweightMLP(loss, timesteps)
-
                                     if args.loss_multipler:
                                         loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
+                                    # For logging
+                                    pre_scaling_loss = loss.mean()
+
+                                    if args.edm2_loss_weighting:
+                                        loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                                     loss = loss.mean()  # Average over batch
                                     loss_scaled = loss_scaled.mean()
@@ -1828,11 +1846,13 @@ class NetworkTrainer:
                                     # Divide loss by iter_size to average over accumulated steps
                                     loss = loss / len(batch_data_list)
 
-                                    # Accumulate total loss
-                                    total_loss += loss.detach()
-
                                     # Backward pass
                                     accelerator.backward(loss)
+
+                                    loss = pre_scaling_loss / len(batch_data_list)
+
+                                    # Accumulate total loss
+                                    total_loss += loss.detach()
 
                             self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
@@ -2099,16 +2119,21 @@ class NetworkTrainer:
                         # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                        if args.edm2_loss_weighting:
-                            loss, loss_scaled = lossweightMLP(loss, timesteps)
-
                         if args.loss_multipler:
                             loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+
+                        # For logging
+                        pre_scaling_loss = loss.mean()
+
+                        if args.edm2_loss_weighting:
+                            loss, loss_scaled = lossweightMLP(loss, timesteps)
 
                         loss = loss.mean()  # Mean over batch
                         loss_scaled = loss_scaled.mean()
                         
                         accelerator.backward(loss)
+
+                        loss = pre_scaling_loss
 
                         if accelerator.sync_gradients:
                             self.all_reduce_network(accelerator, network)  # sync DDP grad manually
