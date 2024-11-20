@@ -953,9 +953,9 @@ def train(args):
 
                     if args.edm2_loss_weighting:
                         loss, loss_scaled = lossweightMLP(loss, timesteps)
+                        loss_scaled = loss_scaled.mean()
 
                     loss = loss.mean()  # Mean over batch
-                    loss_scaled = loss_scaled.mean()
                 else:
                     loss = train_util.conditional_loss(
                         noise_pred.float(), target.float(), reduction="mean", loss_type=args.loss_type, huber_c=huber_c

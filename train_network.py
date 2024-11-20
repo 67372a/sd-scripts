@@ -1564,13 +1564,13 @@ class NetworkTrainer:
 
                             if args.edm2_loss_weighting:
                                 loss, loss_scaled = lossweightMLP(loss, timesteps)
+                                loss_scaled = loss_scaled.mean()
+                                loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                             loss = loss.mean()  # Mean over batch
-                            loss_scaled = loss_scaled.mean()
 
                             # Divide loss by iter_size to average over accumulated steps
                             loss = loss * grad_accum_loss_scaling
-                            loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                             # Backward pass
                             accelerator.backward(loss)
@@ -1692,13 +1692,13 @@ class NetworkTrainer:
 
                         if args.edm2_loss_weighting:
                             loss, loss_scaled = lossweightMLP(loss, timesteps)
+                            loss_scaled = loss_scaled.mean()
+                            loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                         loss = loss.mean()  # Average over batch
-                        loss_scaled = loss_scaled.mean()
 
                         # Divide loss by iter_size to average over accumulated steps
                         loss = loss * grad_accum_loss_scaling
-                        loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                         # Backward pass
                         accelerator.backward(loss)
@@ -1781,13 +1781,13 @@ class NetworkTrainer:
 
                                         if args.edm2_loss_weighting:
                                             loss, loss_scaled = lossweightMLP(loss, timesteps)
+                                            loss_scaled = loss_scaled.mean()
+                                            loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                                         loss = loss.mean()  # Average over batch
-                                        loss_scaled = loss_scaled.mean()
 
                                         # Divide loss by iter_size to average over accumulated steps
                                         loss = loss * grad_accum_loss_scaling
-                                        loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                                         # Backward pass
                                         accelerator.backward(loss)
@@ -1835,13 +1835,13 @@ class NetworkTrainer:
 
                                     if args.edm2_loss_weighting:
                                         loss, loss_scaled = lossweightMLP(loss, timesteps)
+                                        loss_scaled = loss_scaled.mean()
+                                        loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                                     loss = loss.mean()  # Average over batch
-                                    loss_scaled = loss_scaled.mean()
 
                                     # Divide loss by iter_size to average over accumulated steps
                                     loss = loss * grad_accum_loss_scaling
-                                    loss_scaled = loss_scaled * grad_accum_loss_scaling
 
                                     # Divide loss by iter_size to average over accumulated steps
                                     loss = loss / len(batch_data_list)
@@ -2127,9 +2127,9 @@ class NetworkTrainer:
 
                         if args.edm2_loss_weighting:
                             loss, loss_scaled = lossweightMLP(loss, timesteps)
+                            loss_scaled = loss_scaled.mean()
 
                         loss = loss.mean()  # Mean over batch
-                        loss_scaled = loss_scaled.mean()
                         
                         accelerator.backward(loss)
 
