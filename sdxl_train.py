@@ -9,7 +9,7 @@ from typing import List
 import toml
 import numpy as np
 import random
-import tools.edm2_loss_mm
+import tools.edm2_loss_mm as edm2_loss_mm
 import ast
 
 
@@ -787,18 +787,41 @@ def train(args):
     if args.zero_terminal_snr:
         custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
-        if args.edm2_loss_weighting:
-            values = args.edm2_loss_weighting_optimizer.split(".")
-            optimizer_module = importlib.import_module(".".join(values[:-1]))
-            case_sensitive_optimizer_type = values[-1]
-            opti_args = ast.literal_eval(args.edm2_loss_weighting_optimizer_args)
-            opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 1e-2
+    if args.edm2_loss_weighting:
+        values = args.edm2_loss_weighting_optimizer.split(".")
+        optimizer_module = importlib.import_module(".".join(values[:-1]))
+        case_sensitive_optimizer_type = values[-1]
+        opti_args = ast.literal_eval(args.edm2_loss_weighting_optimizer_args)
+        opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 2e-2
 
-            lossweightMLP, MLP_optim = edm2_loss_mm.create_weight_MLP(noise_scheduler,
-                                                                      optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
-                                                                      lr=opti_lr,
-                                                                      optimizer_args=opti_args)
-            lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
+        lossweightMLP, MLP_optim = edm2_loss_mm.create_weight_MLP(noise_scheduler,
+                                                                    optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
+                                                                    lr=opti_lr,
+                                                                    optimizer_args=opti_args)
+        
+        if args.edm2_loss_weighting_lr_scheduler:
+            def InverseSqrt(
+                optimizer: torch.optim.Optimizer,
+                warmup_steps: int = 0,
+                constant_steps: int = 0,
+            ):
+                def lr_lambda(current_step: int):
+                    if current_step <= warmup_steps:
+                        return current_step / max(1, warmup_steps)
+                    else:
+                        return 1/math.sqrt(max(current_step/(warmup_steps+constant_steps), 1))
+                return torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
+            
+            mlp_lr_scheduler = InverseSqrt(
+                MLP_optim,
+                warmup_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_warmup_percent) if args.edm2_loss_weighting_lr_scheduler_warmup_percent is not None else 0.05,
+                constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15
+            )
+            mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
+        else:
+            mlp_lr_scheduler = None
+
+        lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
 
     if accelerator.is_main_process:
         init_kwargs = {}
@@ -980,6 +1003,10 @@ def train(args):
                         MLP_optim.step()
 
                     lr_scheduler.step()
+
+                    if args.edm2_loss_weighting and mlp_lr_scheduler is not None:
+                        mlp_lr_scheduler.step()
+
                     optimizer.zero_grad(set_to_none=True)
 
                     if args.edm2_loss_weighting:
@@ -1262,7 +1289,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_optimizer_lr",
         type=float,
-        default=1e-2,
+        default=2e-2,
         help="Learning rate as a float for the edm2 loss weighting optimizer.",
     )
 
@@ -1271,6 +1298,26 @@ def setup_parser() -> argparse.ArgumentParser:
         type=str,
         default=r"{'weight_decay':0}",
         help="A JSON object as a string of optimizer args for the edm2 loss weighting optimizer.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_lr_scheduler",
+        action="store_true",
+        help="Use lr scheduler with EDM2 loss weighting optimizer.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_lr_scheduler_warmup_percent",
+        type=float,
+        default=0.05,
+        help="Percent of training steps to use for warmup.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_lr_scheduler_constant_percent",
+        type=float,
+        default=0.15,
+        help="Percent of training steps to maintain constant LR before decay.",
     )
 
     return parser
