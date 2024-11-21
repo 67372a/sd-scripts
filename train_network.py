@@ -2599,14 +2599,14 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_lr_scheduler_warmup_percent",
         type=float,
-        default=0.05,
+        default=0.10,
         help="Percent of training steps to use for warmup.",
     )
 
     parser.add_argument(
         "--edm2_loss_weighting_lr_scheduler_constant_percent",
         type=float,
-        default=0.15,
+        default=0.20,
         help="Percent of training steps to maintain constant LR before decay.",
     )
 
