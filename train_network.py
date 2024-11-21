@@ -1556,8 +1556,8 @@ class NetworkTrainer:
                             loss_weights = batch["loss_weights"]  # Sample-wise weights
                             loss = loss * loss_weights
 
-                            if args.loss_multipler:
-                                loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+                            if args.loss_multipler or args.loss_multiplier:
+                                loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
 
                             # For logging
                             pre_scaling_loss = loss.mean() * grad_accum_loss_scaling
@@ -1684,8 +1684,8 @@ class NetworkTrainer:
                         # Post-process loss
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                        if args.loss_multipler:
-                            loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+                        if args.loss_multipler or args.loss_multiplier:
+                            loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
 
                         # For logging
                         pre_scaling_loss = loss.mean()
@@ -1773,8 +1773,8 @@ class NetworkTrainer:
                                         # Post-process loss if needed
                                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                                        if args.loss_multipler:
-                                            loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+                                        if args.loss_multipler or args.loss_multiplier:
+                                            loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
 
                                         # For logging
                                         pre_scaling_loss = loss.mean()
@@ -1827,8 +1827,8 @@ class NetworkTrainer:
                                     # Post-process loss if needed
                                     loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                                    if args.loss_multipler:
-                                        loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+                                    if args.loss_multipler or args.loss_multiplier:
+                                        loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
 
                                     # For logging
                                     pre_scaling_loss = loss.mean()
@@ -2122,8 +2122,8 @@ class NetworkTrainer:
                         # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                        if args.loss_multipler:
-                            loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+                        if args.loss_multipler or args.loss_multiplier:
+                            loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
 
                         # For logging
                         pre_scaling_loss = loss.mean()
@@ -2503,6 +2503,13 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="A raw multipler to apply to loss.",
+    )
+
+    parser.add_argument(
+        "--loss_multiplier",
+        type=float,
+        default=1.0,
+        help="A raw multiplier to apply to loss.",
     )
 
     parser.add_argument(

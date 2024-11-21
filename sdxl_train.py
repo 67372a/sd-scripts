@@ -925,7 +925,8 @@ def train(args):
                     or args.v_pred_like_loss
                     or args.debiased_estimation_loss
                     or args.masked_loss
-                    or args.loss_multipler
+                    or args.loss_multipler 
+                    or args.loss_multiplier
                     or args.edm2_loss_weighting
                 ):
                     # do not mean over batch dimension for snr weight or scale v-pred loss
@@ -945,8 +946,8 @@ def train(args):
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
-                    if args.loss_multipler:
-                        loss.mul_(float(args.loss_multipler) if args.loss_multipler is not None else 1.0)
+                    if args.loss_multipler or args.loss_multiplier:
+                        loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
 
                     # For logging
                     pre_scaling_loss = loss.mean()
@@ -1236,6 +1237,13 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="A raw multipler to apply to loss.",
+    )
+
+    parser.add_argument(
+        "--loss_multiplier",
+        type=float,
+        default=1.0,
+        help="A raw multiplier to apply to loss.",
     )
 
     parser.add_argument(
