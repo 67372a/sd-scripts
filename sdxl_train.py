@@ -1040,6 +1040,9 @@ def train(args):
                 current_loss_scaled = loss_scaled.detach().item()
                 loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
                 average_loss_scaled: float = loss_scaled_recorder.moving_average
+            else:
+                current_loss_scaled = None
+                average_loss_scaled = None
             avr_loss: float = loss_recorder.moving_average
             logs = {"loss": current_loss, "avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
