@@ -1312,7 +1312,8 @@ class NetworkTrainer:
             lossweightMLP, MLP_optim = edm2_loss_mm.create_weight_MLP(noise_scheduler,
                                                                       optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
                                                                       lr=opti_lr,
-                                                                      optimizer_args=opti_args)
+                                                                      optimizer_args=opti_args,
+                                                                      device=accelerator.device)
             
             if args.edm2_loss_weighting_lr_scheduler:
                 def InverseSqrt(
@@ -2586,7 +2587,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_optimizer_args",
         type=str,
-        default=r"{'weight_decay':0}",
+        default=r"{'weight_decay': 0, 'betas': (0.9,0.99)}",
         help="A JSON object as a string of optimizer args for the edm2 loss weighting optimizer.",
     )
 
