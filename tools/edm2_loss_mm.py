@@ -74,6 +74,9 @@ class AdaptiveLossWeightMLP(nn.Module):
 
         return loss, loss_scaled
     
+    def get_trainable_params(self):
+        return self.parameters()
+    
 def create_weight_MLP(noise_scheduler, 
                       logvar_channels=128, 
                       lambda_weights=None, 

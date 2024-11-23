@@ -75,6 +75,8 @@ class NetworkTrainer:
         average_val_loss=None,
         current_loss_scaled=None,
         average_loss_scaled=None,
+        edm2_grad_norm=None,
+        edm2_grad_norm_clipped=None
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
 
@@ -94,6 +96,10 @@ class NetworkTrainer:
         if current_val_loss is not None:
             logs["loss/current_val_loss"] = current_val_loss                      
             logs["loss/average_val_loss"] = average_val_loss
+
+        if edm2_grad_norm is not None:
+            logs["train/edm2_grad_norm"] = edm2_grad_norm
+            logs["train/edm2_grad_norm_clipped"] = edm2_grad_norm_clipped
 
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
@@ -1402,7 +1408,9 @@ class NetworkTrainer:
             text_encoder = None
 
         grad_norm = 0.0
+        edm2_grad_norm = 0.0
         grad_norm_clipped = 0.0
+        edm2_grad_norm_clipped = 0.0
         current_val_loss, average_val_loss, val_logs = None, None, {}
         keys_scaled, mean_norm, maximum_norm = None, None, None
         max_mean_logs = {}
@@ -2171,6 +2179,7 @@ class NetworkTrainer:
                         if accelerator.sync_gradients:
                             self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                            
                             if args.max_grad_norm != 0.0:
                                 grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
                                 grad_norm_clipped = min(grad_norm, args.max_grad_norm)
@@ -2184,6 +2193,17 @@ class NetworkTrainer:
                         optimizer.step()
 
                         if args.edm2_loss_weighting:
+                            if accelerator.sync_gradients:
+                                self.all_reduce_network(accelerator, lossweightMLP)  # sync DDP grad manually
+                                params_to_clip = accelerator.unwrap_model(lossweightMLP).get_trainable_params()
+                                edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                                if edm2_loss_weighting_max_grad_norm != 0.0:
+                                    edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+                                    edm2_grad_norm_clipped = min(grad_norm, edm2_loss_weighting_max_grad_norm)
+                                else: 
+                                    edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
+                                    edm2_grad_norm_clipped = edm2_grad_norm
+
                             MLP_optim.step()
 
                         lr_scheduler.step()
@@ -2270,12 +2290,12 @@ class NetworkTrainer:
                     if val_logs:
                         logs = {**val_logs, **logs}
 
-                    if args.max_grad_norm != 0.0 :
+                    if args.max_grad_norm != 0.0:
                         logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped
                         )
                         accelerator.log(logs, step=global_step)
                                             
@@ -2609,6 +2629,13 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.20,
         help="Percent of training steps to maintain constant LR before decay.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Max grad norm to apply to edm2 loss weighting gradients.",
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
