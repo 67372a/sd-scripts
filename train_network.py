@@ -2199,7 +2199,7 @@ class NetworkTrainer:
                                 edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
                                 if edm2_loss_weighting_max_grad_norm != 0.0:
                                     edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
-                                    edm2_grad_norm_clipped = min(grad_norm, edm2_loss_weighting_max_grad_norm)
+                                    edm2_grad_norm_clipped = min(edm2_grad_norm, edm2_loss_weighting_max_grad_norm)
                                 else: 
                                     edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                                     edm2_grad_norm_clipped = edm2_grad_norm
