@@ -13,6 +13,7 @@ from tools.grokfast import Gradfilter_ma, Gradfilter_ema
 import numpy as np
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 
@@ -52,7 +53,6 @@ import itertools
 
 logger = logging.getLogger(__name__)
 
-
 class NetworkTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215
@@ -76,7 +76,8 @@ class NetworkTrainer:
         current_loss_scaled=None,
         average_loss_scaled=None,
         edm2_grad_norm=None,
-        edm2_grad_norm_clipped=None
+        edm2_grad_norm_clipped=None,
+        edm2_lr_scheduler=None
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
 
@@ -122,6 +123,10 @@ class NetworkTrainer:
                 logs[f"lr/d*lr/{lr_desc}"] = (
                     lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
                 )
+
+        if edm2_lr_scheduler is not None:
+            logs[f"lr/edm2"] = edm2_lr_scheduler.get_last_lr()[0]
+
 
         return logs
 
@@ -313,6 +318,46 @@ class NetworkTrainer:
         pass
 
     # endregion
+
+    def plot_dynamic_loss_weighting(self, args, step, model, num_timesteps=1000, device="cpu"):
+        """
+        Plot the dynamic loss weighting across timesteps using the learned parameters of the DynamicLossModule.
+
+        :param model: The DynamicLossModule instance (after training).
+        :param num_timesteps: Total number of timesteps to plot.
+        :param scale: Scaling factor for the input time.
+        :param device: Device to run computations on.
+        """
+        with torch.inference_mode():
+            # Generate a range of timesteps
+            timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to(device).int()
+
+            model.train(False)
+            loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
+            model.train(True)
+
+            # Plot the dynamic loss weights over time
+            plt.figure(figsize=(10, 6))
+            plt.plot(timesteps.cpu().numpy(), loss.cpu().numpy(),
+                    label=f'Dynamic Loss Weight\nStep: {step}')
+            plt.xlabel('Timesteps')
+            plt.ylabel('Weight')
+            plt.title('Dynamic Loss Weighting vs Timesteps')
+            plt.legend()
+            plt.grid(True)
+            plt.ylim(bottom=1)
+            plt.xlim(left=0, right=1000)
+            # plt.show()
+            os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
+
+            output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
+            try:
+                os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
+                plt.savefig(os.path.join(output_dir, f"weighting_step_{step}.png"))
+            except Exception as e:
+                logger.warning(f"Failed to save weighting graph image. Due to: {e}")
+
+            plt.close()
 
     def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
         total_loss = 0.0
@@ -1320,10 +1365,10 @@ class NetworkTrainer:
                                                                       lr=opti_lr,
                                                                       optimizer_args=opti_args,
                                                                       device=accelerator.device)
-            
+
             if args.edm2_loss_weighting_lr_scheduler:
                 def InverseSqrt(
-                    optimizer: torch.optim.Optimizer,
+                    wrap_optimizer: torch.optim.Optimizer,
                     warmup_steps: int = 0,
                     constant_steps: int = 0,
                 ):
@@ -1331,19 +1376,21 @@ class NetworkTrainer:
                         if current_step <= warmup_steps:
                             return current_step / max(1, warmup_steps)
                         else:
-                            return 1/math.sqrt(max(current_step/(warmup_steps+constant_steps), 1))
-                    return torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
+                            return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1), 1))
+                    return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
                 
                 mlp_lr_scheduler = InverseSqrt(
                     MLP_optim,
                     warmup_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_warmup_percent) if args.edm2_loss_weighting_lr_scheduler_warmup_percent is not None else 0.05,
                     constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15
                 )
-                mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
             else:
-                mlp_lr_scheduler = None
+                mlp_lr_scheduler = train_util.get_dummy_scheduler(MLP_optim)
 
+            mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
+                
             lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
+            self.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
         if accelerator.is_main_process:
             init_kwargs = {}
@@ -2007,7 +2054,7 @@ class NetworkTrainer:
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled, mlp_lr_scheduler
                         )
                         accelerator.log(logs, step=global_step)
                                             
@@ -2243,6 +2290,10 @@ class NetworkTrainer:
                         global_step += 1
 
                         optimizer_eval_fn()
+
+                        if global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps:
+                            self.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
+
                         self.sample_images(
                             accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                         )
@@ -2295,7 +2346,7 @@ class NetworkTrainer:
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler
                         )
                         accelerator.log(logs, step=global_step)
                                             
@@ -2310,6 +2361,7 @@ class NetworkTrainer:
 
                 # 指定エポックごとにモデルを保存
                 optimizer_eval_fn()
+
                 if args.save_every_n_epochs is not None:
                     saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                     if is_main_process and saving:
@@ -2627,7 +2679,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_lr_scheduler_constant_percent",
         type=float,
-        default=0.20,
+        default=0.10,
         help="Percent of training steps to maintain constant LR before decay.",
     )
 
@@ -2636,6 +2688,26 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Max grad norm to apply to edm2 loss weighting gradients.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph",
+        action="store_true",
+        help="Enable generation of graph iamges that show the loss weighting per timestep.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph_every_x_steps",
+        type=int,
+        default=20,
+        help="Every x steps generate a graph image.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph_output_dir",
+        type=str,
+        default=None,
+        help="The parent directory where loss weighting graph images should be stored, with sub directories automatically created and named after the lora's defined name.",
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
