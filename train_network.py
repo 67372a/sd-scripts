@@ -13,7 +13,10 @@ from tools.grokfast import Gradfilter_ma, Gradfilter_ema
 import numpy as np
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to 'Agg'
 import matplotlib.pyplot as plt
+plt.ioff()
 
 from tqdm import tqdm
 
@@ -335,8 +338,6 @@ class NetworkTrainer:
             model.train(False)
             loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
             model.train(True)
-
-            plt.ioff()
 
             # Plot the dynamic loss weights over time
             plt.figure(figsize=(10, 6))
