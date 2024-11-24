@@ -11,6 +11,10 @@ import numpy as np
 import random
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to 'Agg'
+import matplotlib.pyplot as plt
+plt.ioff()
 
 
 from tqdm import tqdm
@@ -247,6 +251,46 @@ def calculate_val_loss(self,
             torch.cuda.set_rng_state(state, i)
 
     return current_val_loss, average_val_loss, logs
+
+def plot_dynamic_loss_weighting(args, step, model, num_timesteps=1000, device="cpu"):
+    """
+    Plot the dynamic loss weighting across timesteps using the learned parameters of the DynamicLossModule.
+
+    :param model: The DynamicLossModule instance (after training).
+    :param num_timesteps: Total number of timesteps to plot.
+    :param scale: Scaling factor for the input time.
+    :param device: Device to run computations on.
+    """
+    with torch.inference_mode():
+        # Generate a range of timesteps
+        timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to(device).int()
+
+        model.train(False)
+        loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
+        model.train(True)
+
+        # Plot the dynamic loss weights over time
+        plt.figure(figsize=(10, 6))
+        plt.plot(timesteps.cpu().numpy(), loss.cpu().numpy(),
+                label=f'Dynamic Loss Weight\nStep: {step}')
+        plt.xlabel('Timesteps')
+        plt.ylabel('Weight')
+        plt.title('Dynamic Loss Weighting vs Timesteps')
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(bottom=1)
+        plt.xlim(left=0, right=1000)
+        # plt.show()
+        os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
+
+        output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            plt.savefig(os.path.join(output_dir, f"weighting_step_{str(step).zfill(8)}.png"))
+        except Exception as e:
+            logger.warning(f"Failed to save weighting graph image. Due to: {e}")
+
+        plt.close()
 
 def train(args):
     train_util.verify_training_args(args)
@@ -799,10 +843,10 @@ def train(args):
                                                                     lr=opti_lr,
                                                                     optimizer_args=opti_args,
                                                                     device=accelerator.device)
-        
+
         if args.edm2_loss_weighting_lr_scheduler:
             def InverseSqrt(
-                optimizer: torch.optim.Optimizer,
+                wrap_optimizer: torch.optim.Optimizer,
                 warmup_steps: int = 0,
                 constant_steps: int = 0,
             ):
@@ -810,19 +854,21 @@ def train(args):
                     if current_step <= warmup_steps:
                         return current_step / max(1, warmup_steps)
                     else:
-                        return 1/math.sqrt(max(current_step/(warmup_steps+constant_steps), 1))
-                return torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
+                        return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1), 1))
+                return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
             
             mlp_lr_scheduler = InverseSqrt(
                 MLP_optim,
                 warmup_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_warmup_percent) if args.edm2_loss_weighting_lr_scheduler_warmup_percent is not None else 0.05,
                 constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15
             )
-            mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
         else:
-            mlp_lr_scheduler = None
+            mlp_lr_scheduler = train_util.get_dummy_scheduler(MLP_optim)
 
+        mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
+            
         lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
+        plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
     if accelerator.is_main_process:
         init_kwargs = {}
@@ -1001,6 +1047,12 @@ def train(args):
                     optimizer.step()
 
                     if args.edm2_loss_weighting:
+                        edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                        if accelerator.sync_gradients and edm2_loss_weighting_max_grad_norm != 0.0:
+                            params_to_clip = []
+                            params_to_clip.extend(lossweightMLP.parameters())
+                            accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+
                         MLP_optim.step()
 
                     lr_scheduler.step()
@@ -1023,6 +1075,9 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                if global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps:
+                    plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                 sdxl_train_util.sample_images(
                     accelerator,
@@ -1088,6 +1143,9 @@ def train(args):
                     train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
                 else:
                     append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
+
+                if edm2_lr_scheduler is not None:
+                    logs[f"lr/edm2"] = edm2_lr_scheduler.get_last_lr()[0]
 
                 accelerator.log(logs, step=global_step)
 
@@ -1317,8 +1375,35 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_lr_scheduler_constant_percent",
         type=float,
-        default=0.20,
+        default=0.10,
         help="Percent of training steps to maintain constant LR before decay.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Max grad norm to apply to edm2 loss weighting gradients.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph",
+        action="store_true",
+        help="Enable generation of graph iamges that show the loss weighting per timestep.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph_every_x_steps",
+        type=int,
+        default=20,
+        help="Every x steps generate a graph image.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph_output_dir",
+        type=str,
+        default=None,
+        help="The parent directory where loss weighting graph images should be stored, with sub directories automatically created and named after the lora's defined name.",
     )
 
     return parser
