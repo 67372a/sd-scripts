@@ -1018,7 +1018,7 @@ def train(args):
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
                     if args.loss_multipler or args.loss_multiplier:
-                        loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler or args.loss_multiplier is not None else 1.0)
+                        loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
 
                     # For logging
                     pre_scaling_loss = loss.mean()
