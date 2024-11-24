@@ -46,7 +46,7 @@ class AdaptiveLossWeightMLP(nn.Module):
     def __init__(
             self,
             noise_scheduler: DDPMScheduler,
-            logvar_channels=128,
+            logvar_channels: int = 128,
             lambda_weights: torch.Tensor = None,
             device='cuda'
         ):
@@ -77,12 +77,12 @@ class AdaptiveLossWeightMLP(nn.Module):
     def get_trainable_params(self):
         return self.parameters()
     
-def create_weight_MLP(noise_scheduler, 
-                      logvar_channels=128, 
-                      lambda_weights=None, 
-                      optimizer=torch.optim.AdamW, 
-                      lr=2e-2,
-                      optimizer_args={'weight_decay': 0, 'betas': (0.9,0.99)},
+def create_weight_MLP(noise_scheduler: DDPMScheduler, 
+                      logvar_channels: int = 128, 
+                      lambda_weights: torch.tensor = None, 
+                      optimizer: torch.optim.Optimizer = torch.optim.AdamW, 
+                      lr: float = 2e-2,
+                      optimizer_args: dict = {'weight_decay': 0, 'betas': (0.9,0.99)},
                       device='cuda'):
     print("creating weight MLP")
     lossweightMLP = AdaptiveLossWeightMLP(noise_scheduler, logvar_channels, lambda_weights, device)
