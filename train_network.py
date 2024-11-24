@@ -1380,18 +1380,20 @@ class NetworkTrainer:
                     wrap_optimizer: torch.optim.Optimizer,
                     warmup_steps: int = 0,
                     constant_steps: int = 0,
+                    decay_scaling: float = 1.0,
                 ):
                     def lr_lambda(current_step: int):
                         if current_step <= warmup_steps:
                             return current_step / max(1, warmup_steps)
                         else:
-                            return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1), 1))
+                            return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1) * decay_scaling, 1))
                     return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
                 
                 mlp_lr_scheduler = InverseSqrt(
                     MLP_optim,
                     warmup_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_warmup_percent) if args.edm2_loss_weighting_lr_scheduler_warmup_percent is not None else 0.05,
-                    constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15
+                    constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15,
+                    decay_scaling=float(args.edm2_loss_weighting_lr_scheduler_decay_scaling) if args.edm2_loss_weighting_lr_scheduler_decay_scaling is not None else 1.0,
                 )
             else:
                 mlp_lr_scheduler = train_util.get_dummy_scheduler(MLP_optim)
@@ -2777,6 +2779,13 @@ def setup_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="The full filepath to initial weights and state of edm2 weighting model to use instead of random.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_lr_scheduler_decay_scaling",
+        type=float,
+        default=1.0,
+        help="A scaling factor to apply to the decay rate of the edm2_loss_weighting_lr_scheduler, lower values result in slower decay, higher values result in faster decay.",
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
