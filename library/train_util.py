@@ -5744,16 +5744,25 @@ def get_hidden_states_sdxl(
 def default_if_none(value, default):
     return default if value is None else value
 
+def get_epoch_loss_weights_ckpt_name(args: argparse.Namespace, ext: str, epoch_no: int):
+    model_name = default_if_none(args.output_name, DEFAULT_EPOCH_NAME)
+    return EPOCH_FILE_NAME.format(model_name + "_edm2_loss_weights", epoch_no) + ext
 
 def get_epoch_ckpt_name(args: argparse.Namespace, ext: str, epoch_no: int):
     model_name = default_if_none(args.output_name, DEFAULT_EPOCH_NAME)
     return EPOCH_FILE_NAME.format(model_name, epoch_no) + ext
 
+def get_step_loss_weights_ckpt_name(args: argparse.Namespace, ext: str, step_no: int):
+    model_name = default_if_none(args.output_name, DEFAULT_STEP_NAME)
+    return STEP_FILE_NAME.format(model_name + "_edm2_loss_weights", step_no) + ext
 
 def get_step_ckpt_name(args: argparse.Namespace, ext: str, step_no: int):
     model_name = default_if_none(args.output_name, DEFAULT_STEP_NAME)
     return STEP_FILE_NAME.format(model_name, step_no) + ext
 
+def get_last_loss_weights_ckpt_name(args: argparse.Namespace, ext: str):
+    model_name = default_if_none(args.output_name + "_edm2_loss_weights", DEFAULT_LAST_OUTPUT_NAME)
+    return model_name + ext
 
 def get_last_ckpt_name(args: argparse.Namespace, ext: str):
     model_name = default_if_none(args.output_name, DEFAULT_LAST_OUTPUT_NAME)

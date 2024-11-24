@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from diffusers import DDPMScheduler
+import os
 
 def normalize(x: torch.Tensor, dim=None, eps=1e-4) -> torch.Tensor:
     if dim is None:
@@ -76,6 +77,44 @@ class AdaptiveLossWeightMLP(nn.Module):
     
     def get_trainable_params(self):
         return self.parameters()
+    
+    def save_weights(self, file, dtype, metadata):
+        if metadata is not None and len(metadata) == 0:
+            metadata = None
+
+        state_dict = self.state_dict()
+
+        if dtype is not None:
+            for key in list(state_dict.keys()):
+                v = state_dict[key]
+                v = v.detach().clone().to("cpu").to(dtype)
+                state_dict[key] = v
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import save_file
+            from library import train_util
+
+            # Precalculate model hashes to save time on indexing
+            if metadata is None:
+                metadata = {}
+            model_hash, legacy_hash = train_util.precalculate_safetensors_hashes(state_dict, metadata)
+            metadata["sshs_model_hash"] = model_hash
+            metadata["sshs_legacy_hash"] = legacy_hash
+
+            save_file(state_dict, file, metadata)
+        else:
+            torch.save(state_dict, file)
+
+    def load_weights(self, file):
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import load_file
+
+            weights_sd = load_file(file)
+        else:
+            weights_sd = torch.load(file, map_location="cpu")
+
+        info = self.load_state_dict(weights_sd, False)
+        return info
     
 def create_weight_MLP(noise_scheduler: DDPMScheduler, 
                       logvar_channels: int = 128, 

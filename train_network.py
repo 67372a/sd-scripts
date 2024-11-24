@@ -1372,6 +1372,8 @@ class NetworkTrainer:
                                                                       lr=opti_lr,
                                                                       optimizer_args=opti_args,
                                                                       device=accelerator.device)
+            if args.edm2_loss_weighting_initial_weights:
+                lossweightMLP.load_weights(args.edm2_loss_weighting_initial_weights)
 
             if args.edm2_loss_weighting_lr_scheduler:
                 def InverseSqrt(
@@ -1429,7 +1431,7 @@ class NetworkTrainer:
             on_step_start_for_network = lambda *args, **kwargs: None
 
         # function for saving/removing
-        def save_model(ckpt_name, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
+        def save_model(ckpt_name, unwrapped_nw, steps, epoch_no, force_sync_upload=False, dtype_override=None):
             os.makedirs(args.output_dir, exist_ok=True)
             ckpt_file = os.path.join(args.output_dir, ckpt_name)
 
@@ -1442,7 +1444,7 @@ class NetworkTrainer:
             sai_metadata = self.get_sai_model_spec(args)
             metadata_to_save.update(sai_metadata)
 
-            unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
+            unwrapped_nw.save_weights(ckpt_file, dtype_override or save_dtype, metadata_to_save)
             if args.huggingface_repo_id is not None:
                 huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -2023,6 +2025,10 @@ class NetworkTrainer:
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
+                                if args.edm2_loss_weighting:
+                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as)
+                                    save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
+
                                 if args.save_state:
                                     train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
 
@@ -2030,6 +2036,10 @@ class NetworkTrainer:
                                 if remove_step_no is not None:
                                     remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                     remove_model(remove_ckpt_name)
+
+                                    if args.edm2_loss_weighting:
+                                        remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                        remove_model(remove_loss_weights_ckpt_name)
                         optimizer_train_fn()
 
                     current_loss = loss.detach().item() / grad_accum_loss_scaling  # Multiply back since we divided earlier
@@ -2082,10 +2092,18 @@ class NetworkTrainer:
                         ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
                         save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
+                        if args.edm2_loss_weighting:
+                            loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                            save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
+
                         remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
                         if remove_epoch_no is not None:
                             remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
                             remove_model(remove_ckpt_name)
+
+                            if args.edm2_loss_weighting:
+                                remove_loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                                remove_model(remove_loss_weights_ckpt_name)
 
                         if args.save_state:
                             train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
@@ -2315,6 +2333,10 @@ class NetworkTrainer:
                                 ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
+                                if args.edm2_loss_weighting:
+                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as)
+                                    save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
+
                                 if args.save_state:
                                     train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
 
@@ -2322,6 +2344,11 @@ class NetworkTrainer:
                                 if remove_step_no is not None:
                                     remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                     remove_model(remove_ckpt_name)
+
+                                    if args.edm2_loss_weighting:
+                                        remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                        remove_model(remove_loss_weights_ckpt_name)
+
                         optimizer_train_fn()
 
                     current_loss = loss.detach().item()
@@ -2375,10 +2402,18 @@ class NetworkTrainer:
                         ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
                         save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
+                        if args.edm2_loss_weighting:
+                            loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                            save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
+
                         remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
                         if remove_epoch_no is not None:
                             remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
                             remove_model(remove_ckpt_name)
+
+                            if args.edm2_loss_weighting:
+                                remove_loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                                remove_model(remove_loss_weights_ckpt_name)
 
                         if args.save_state:
                             train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
@@ -2403,6 +2438,10 @@ class NetworkTrainer:
         if is_main_process:
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
             save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+
+            if args.edm2_loss_weighting:
+                loss_weights_ckpt_name = train_util.get_last_loss_weights_ckpt_name(args, "." + args.save_model_as)
+                save_model(loss_weights_ckpt_name, lossweightMLP, global_step, num_train_epochs, force_sync_upload=True, dtype_override=torch.float32)
 
             logger.info("model saved.")
 
@@ -2733,7 +2772,12 @@ def setup_parser() -> argparse.ArgumentParser:
         help="The number of channels used by for the loss weighting module. Additional channels allows for greater granularity in the weighting.",
     )
 
-
+    parser.add_argument(
+        "--edm2_loss_weighting_initial_weights",
+        type=str,
+        default=None,
+        help="The full filepath to initial weights and state of edm2 weighting model to use instead of random.",
+    )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
