@@ -279,6 +279,8 @@ def plot_dynamic_loss_weighting(args, step, model, num_timesteps=1000, device="c
         plt.legend()
         plt.grid(True)
         plt.ylim(bottom=1)
+        if args.edm2_loss_weighting_generate_graph_y_limit is not None:
+            plt.ylim(top=int(args.edm2_loss_weighting_generate_graph_y_limit))
         plt.xlim(left=0, right=num_timesteps)
         plt.xticks(np.arange(0, num_timesteps+1, 100)) 
         # plt.show()
@@ -840,6 +842,7 @@ def train(args):
         opti_lr = float(args.edm2_loss_weighting_optimizer_lr) if args.edm2_loss_weighting_optimizer_lr else 2e-2
 
         lossweightMLP, MLP_optim = edm2_loss_mm.create_weight_MLP(noise_scheduler,
+                                                                    logvar_channels=int(args.edm2_loss_weighting_num_channels) if args.edm2_loss_weighting_num_channels else 128,
                                                                     optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
                                                                     lr=opti_lr,
                                                                     optimizer_args=opti_args,
@@ -1390,7 +1393,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_generate_graph",
         action="store_true",
-        help="Enable generation of graph iamges that show the loss weighting per timestep.",
+        help="Enable generation of graph images that show the loss weighting per timestep.",
     )
 
     parser.add_argument(
@@ -1405,6 +1408,22 @@ def setup_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="The parent directory where loss weighting graph images should be stored, with sub directories automatically created and named after the lora's defined name.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph_y_limit",
+        type=int,
+        default=None,
+        help="""Set the max limit of the y axis, if not set, uses dynamic scaling of the y-axis, which can make it harder to follow. 
+        8 is a good value for v-pred + ztsnr without any augmentation (i.e. low min snr gamma, debiased loss, or scaled v-pred loss). 
+        If any of the noted augmentations are used, weighting values can reach ~100-150.""",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_num_channels",
+        type=int,
+        default=128,
+        help="The number of channels used by for the loss weighting module. Additional channels allows for greater granularity in the weighting.",
     )
 
     return parser
