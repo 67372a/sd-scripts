@@ -349,14 +349,15 @@ class NetworkTrainer:
             plt.legend()
             plt.grid(True)
             plt.ylim(bottom=1)
-            plt.xlim(left=0, right=1000)
+            plt.xlim(left=0, right=num_timesteps)
+            plt.xticks(np.arange(0, num_timesteps+1, 100)) 
             # plt.show()
             os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
 
             output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
             try:
                 os.makedirs(output_dir, exist_ok=True)
-                plt.savefig(os.path.join(output_dir, f"weighting_step_{str(step).zfill(8)}.png"))
+                plt.savefig(os.path.join(output_dir, f"weighting_step_{str(step).zfill(7)}.png"))
             except Exception as e:
                 logger.warning(f"Failed to save weighting graph image. Due to: {e}")
 
