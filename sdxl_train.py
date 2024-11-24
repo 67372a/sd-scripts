@@ -1322,14 +1322,14 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loss_multipler",
         type=float,
-        default=1.0,
+        default=None,
         help="A raw multipler to apply to loss.",
     )
 
     parser.add_argument(
         "--loss_multiplier",
         type=float,
-        default=1.0,
+        default=None,
         help="A raw multiplier to apply to loss.",
     )
 
