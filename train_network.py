@@ -336,6 +336,8 @@ class NetworkTrainer:
             loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
             model.train(True)
 
+            plt.ioff()
+
             # Plot the dynamic loss weights over time
             plt.figure(figsize=(10, 6))
             plt.plot(timesteps.cpu().numpy(), loss.cpu().numpy(),
