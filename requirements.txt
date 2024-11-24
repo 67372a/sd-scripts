@@ -14,7 +14,7 @@ tensorboard
 safetensors==0.4.5
 # gradio==3.16.2
 # Breaking changes with newer versions
-altair==4.2.2 
+altair==5.5.0 
 easygui==0.98.3
 toml==0.10.2
 voluptuous==0.15.2
