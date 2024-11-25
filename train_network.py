@@ -2322,7 +2322,7 @@ class NetworkTrainer:
 
                         optimizer_eval_fn()
 
-                        if args.edm2_loss_weighting and args.args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
+                        if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                             self.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                         self.sample_images(
