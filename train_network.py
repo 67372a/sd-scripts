@@ -578,8 +578,6 @@ class NetworkTrainer:
             torch.backends.cudnn.allow_tf32=False
             torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
 
-        torch.backends.cudnn.benchmark = True
-
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
         use_user_config = args.dataset_config is not None
@@ -1389,7 +1387,7 @@ class NetworkTrainer:
                         if current_step <= warmup_steps:
                             return current_step / max(1, warmup_steps)
                         else:
-                            return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1), 1)**decay_scaling)
+                            return 1 / math.sqrt(max(current_step - warmup_steps / max(constant_steps, 1), 1)**decay_scaling)
                     return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
                 
                 mlp_lr_scheduler = InverseSqrt(
