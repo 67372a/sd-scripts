@@ -1405,6 +1405,8 @@ class NetworkTrainer:
 
             if args.edm2_loss_weighting_generate_graph:
                 self.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
+        else:
+            mlp_lr_scheduler = None
 
         if accelerator.is_main_process:
             init_kwargs = {}
