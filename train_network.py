@@ -1403,7 +1403,7 @@ class NetworkTrainer:
                 
             lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
 
-            if args.args.edm2_loss_weighting_generate_graph:
+            if args.edm2_loss_weighting_generate_graph:
                 self.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
         if accelerator.is_main_process:
