@@ -2368,6 +2368,7 @@ class ControlNetDataset(BaseDataset):
             db_subset = DreamBoothSubset(
                 subset.image_dir,
                 False,
+                False,
                 None,
                 subset.caption_extension,
                 subset.cache_info,
