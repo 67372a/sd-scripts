@@ -1084,7 +1084,7 @@ def train(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                if global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps:
+                if args.edm2_loss_weighting and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                     plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                 sdxl_train_util.sample_images(

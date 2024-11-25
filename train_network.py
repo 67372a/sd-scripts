@@ -1527,6 +1527,8 @@ class NetworkTrainer:
                                             dtype=weight_dtype)
             accelerator.register_for_checkpointing(grad_filter)
 
+        print("args.max_grad_norm="+ str(args.max_grad_norm))
+
         if train_util.is_sam_optimizer(args):
             for epoch in range(epoch_to_start, num_train_epochs):
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
@@ -2254,7 +2256,6 @@ class NetworkTrainer:
                         if accelerator.sync_gradients:
                             self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                            
                             if args.max_grad_norm != 0.0:
                                 grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
                                 grad_norm_clipped = min(grad_norm, args.max_grad_norm)
@@ -2319,7 +2320,7 @@ class NetworkTrainer:
 
                         optimizer_eval_fn()
 
-                        if global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps:
+                        if args.edm2_loss_weighting and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                             self.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                         self.sample_images(
