@@ -876,6 +876,7 @@ def train(args):
         mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
             
         lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
+
         if args.edm2_loss_weighting_generate_graph:
             plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
@@ -1085,7 +1086,7 @@ def train(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                if args.edm2_loss_weighting and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
+                if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                     plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                 sdxl_train_util.sample_images(
