@@ -284,10 +284,10 @@ def plot_dynamic_loss_weighting(args, step, model, num_timesteps=1000, device="c
         plt.xlim(left=0, right=num_timesteps)
         plt.xticks(np.arange(0, num_timesteps+1, 100)) 
         # plt.show()
-        os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
 
-        output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
         try:
+            os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
+            output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
             os.makedirs(output_dir, exist_ok=True)
             plt.savefig(os.path.join(output_dir, f"weighting_step_{str(step).zfill(7)}.png"))
         except Exception as e:
@@ -876,7 +876,8 @@ def train(args):
         mlp_lr_scheduler = accelerator.prepare(mlp_lr_scheduler)
             
         lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
-        plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
+        if args.edm2_loss_weighting_generate_graph:
+            plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
     if accelerator.is_main_process:
         init_kwargs = {}
