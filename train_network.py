@@ -1386,7 +1386,7 @@ class NetworkTrainer:
                         if current_step <= warmup_steps:
                             return current_step / max(1, warmup_steps)
                         else:
-                            return 1 / math.sqrt(max(current_step / (max(warmup_steps + constant_steps, 1) * decay_scaling), 1))
+                            return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1)**decay_scaling, 1))
                     return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
                 
                 mlp_lr_scheduler = InverseSqrt(
