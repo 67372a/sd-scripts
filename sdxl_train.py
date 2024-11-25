@@ -861,7 +861,7 @@ def train(args):
                     if current_step <= warmup_steps:
                         return current_step / max(1, warmup_steps)
                     else:
-                        return 1 / math.sqrt(max(current_step - warmup_steps / max(constant_steps, 1), 1)**decay_scaling)
+                        return 1 / math.sqrt(max(current_step / max(constant_steps + warmup_steps, 1), 1)**decay_scaling)
                 return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
             
             mlp_lr_scheduler = InverseSqrt(
