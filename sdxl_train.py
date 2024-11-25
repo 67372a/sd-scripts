@@ -12,10 +12,9 @@ import random
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
 import matplotlib
-matplotlib.use('Agg')  # Set the backend to 'Agg'
+matplotlib.use('Agg')  # Set the backend to 'Agg', non-interactive backend
 import matplotlib.pyplot as plt
-plt.ioff()
-
+plt.ioff() # Explicitly turn off interactive mode
 
 from tqdm import tqdm
 
@@ -222,7 +221,8 @@ def calculate_val_loss(self,
         torch.manual_seed(val_Seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(val_Seed)
-        
+
+    accelerator.print("")
     accelerator.print("Validating バリデーション処理...")
     total_loss = 0.0
     with torch.no_grad():
@@ -847,24 +847,28 @@ def train(args):
                                                                     lr=opti_lr,
                                                                     optimizer_args=opti_args,
                                                                     device=accelerator.device)
+        if args.edm2_loss_weighting_initial_weights:
+            lossweightMLP.load_weights(args.edm2_loss_weighting_initial_weights)
 
         if args.edm2_loss_weighting_lr_scheduler:
             def InverseSqrt(
                 wrap_optimizer: torch.optim.Optimizer,
                 warmup_steps: int = 0,
                 constant_steps: int = 0,
+                decay_scaling: float = 1.0,
             ):
                 def lr_lambda(current_step: int):
                     if current_step <= warmup_steps:
                         return current_step / max(1, warmup_steps)
                     else:
-                        return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1), 1))
+                        return 1 / math.sqrt(max(current_step / max(warmup_steps + constant_steps, 1), 1)**decay_scaling)
                 return torch.optim.lr_scheduler.LambdaLR(optimizer=wrap_optimizer, lr_lambda=lr_lambda)
             
             mlp_lr_scheduler = InverseSqrt(
                 MLP_optim,
                 warmup_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_warmup_percent) if args.edm2_loss_weighting_lr_scheduler_warmup_percent is not None else 0.05,
-                constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15
+                constant_steps=args.max_train_steps * float(args.edm2_loss_weighting_lr_scheduler_constant_percent) if args.edm2_loss_weighting_lr_scheduler_constant_percent is not None else 0.15,
+                decay_scaling=float(args.edm2_loss_weighting_lr_scheduler_decay_scaling) if args.edm2_loss_weighting_lr_scheduler_decay_scaling is not None else 1.0,
             )
         else:
             mlp_lr_scheduler = train_util.get_dummy_scheduler(MLP_optim)
@@ -1148,8 +1152,8 @@ def train(args):
                 else:
                     append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
 
-                if edm2_lr_scheduler is not None:
-                    logs[f"lr/edm2"] = edm2_lr_scheduler.get_last_lr()[0]
+                if mlp_lr_scheduler is not None:
+                    logs[f"lr/edm2"] = mlp_lr_scheduler.get_last_lr()[0]
 
                 accelerator.log(logs, step=global_step)
 
@@ -1407,7 +1411,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "--edm2_loss_weighting_generate_graph_output_dir",
         type=str,
         default=None,
-        help="The parent directory where loss weighting graph images should be stored, with sub directories automatically created and named after the lora's defined name.",
+        help="""The parent directory where loss weighting graph images should be stored, 
+        with sub directories automatically created and named after the model's defined name.""",
     )
 
     parser.add_argument(
@@ -1424,6 +1429,20 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=128,
         help="The number of channels used by for the loss weighting module. Additional channels allows for greater granularity in the weighting.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_initial_weights",
+        type=str,
+        default=None,
+        help="The full filepath to initial weights and state of edm2 weighting model to use instead of random.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_lr_scheduler_decay_scaling",
+        type=float,
+        default=1.0,
+        help="A scaling factor to apply to the decay rate of the edm2_loss_weighting_lr_scheduler, lower values result in slower decay, higher values result in faster decay.",
     )
 
     return parser

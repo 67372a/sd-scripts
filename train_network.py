@@ -14,9 +14,9 @@ import numpy as np
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
 import matplotlib
-matplotlib.use('Agg')  # Set the backend to 'Agg'
+matplotlib.use('Agg')  # Set the backend to 'Agg', non-interactive backend
 import matplotlib.pyplot as plt
-plt.ioff()
+plt.ioff() # Explicitly turn off interactive mode
 
 from tqdm import tqdm
 
@@ -519,6 +519,7 @@ class NetworkTrainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(val_Seed)
               
+        accelerator.print("") 
         accelerator.print("Validating バリデーション処理...")
         total_loss = 0.0
         with torch.no_grad():
@@ -576,6 +577,8 @@ class NetworkTrainer:
             torch.backends.cuda.matmul.allow_tf32=False
             torch.backends.cudnn.allow_tf32=False
             torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
+
+        torch.backends.cudnn.benchmark = True
 
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
@@ -2755,7 +2758,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "--edm2_loss_weighting_generate_graph_output_dir",
         type=str,
         default=None,
-        help="The parent directory where loss weighting graph images should be stored, with sub directories automatically created and named after the lora's defined name.",
+        help="""The parent directory where loss weighting graph images should be stored, 
+        with sub directories automatically created and named after the model's defined name.""",
     )
 
     parser.add_argument(

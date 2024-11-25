@@ -20,6 +20,7 @@ toml==0.10.2
 voluptuous==0.15.2
 # Breaking changes with newer versions
 huggingface-hub==0.25.2
+matplotlib
 # for Image utils
 imagesize==1.4.1
 # for BLIP captioning
@@ -44,5 +45,4 @@ rich==13.9.4
 # for T5XXL tokenizer (SD3/FLUX)
 sentencepiece==0.2.0
 # for kohya_ss library
-matplotlib
 -e .
