@@ -2795,6 +2795,14 @@ def setup_parser() -> argparse.ArgumentParser:
         help="A scaling factor to apply to the decay rate of the edm2_loss_weighting_lr_scheduler, lower values result in slower decay, higher values result in faster decay.",
     )
 
+    parser.add_argument(
+            "--immiscible_noise",
+            type=int,
+            default=None,
+            help="Batch size to match noise to latent images. Use Immiscible Noise algorithm to project training images only to nearby noise (from arxiv.org/abs/2406.12303) "
+            + "/ ノイズを潜在画像に一致させるためのバッチ サイズ。Immiscible Noise ノイズアルゴリズを使用して、トレーニング画像を近くのノイズにのみ投影します（arxiv.org/abs/2406.12303 より）",
+        )
+
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
     # parser.add_argument("--loraplus_text_encoder_lr_ratio", default=None, type=float, help="LoRA+ text encoder learning rate ratio")

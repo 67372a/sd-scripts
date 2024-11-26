@@ -32,6 +32,7 @@ import hashlib
 import subprocess
 from io import BytesIO
 import toml
+from scipy.optimize import linear_sum_assignment
 
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -6088,10 +6089,57 @@ def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler,
     timesteps = timesteps.long().to(device)
     return timesteps, huber_c
 
+# https://github.com/yhli123/Immiscible-Diffusion/blob/main/stable_diffusion/conditional_ft_train_sd.py#L941
+def immiscible_diffusion_get_noise_v2(args, latents:torch.Tensor, n: int = None):
+    """
+    Generates noise for immiscible diffusion, simplified for single process.
+
+    Args:
+        latents: The latent tensors.
+        args:  Arguments object (must contain train_batch_size).
+
+    Returns:
+        noise: The generated noise tensor.
+    """
+
+    with torch.no_grad():
+        batch_size = latents.shape[0] if n is None else n
+        size = [batch_size] + list(latents.shape[1:])
+        #noise = torch.randn_like(latents)  # [B, C, H, W]
+        noise = torch.randn(size, dtype=latents.dtype, layout=latents.layout, device=latents.device)
+
+        # Distance calculation (simplified for single process)
+        distance = torch.linalg.vector_norm(
+            0.10 * latents.to(torch.float16).flatten(start_dim=1).unsqueeze(1) -
+            0.10 * noise.to(torch.float16).flatten(start_dim=1).unsqueeze(0),
+            dim=2
+        )  # [B, B]
+
+        # Noise Assignment (simplified for single process)
+        _, col_ind = linear_sum_assignment(distance.cpu().numpy())
+        noise = noise[col_ind].to(latents.device)  # Assign the permuted noise
+
+    return noise
+
+def immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps):
+    # "Immiscible Diffusion: Accelerating Diffusion Training with Noise Assignment" (2024) Li et al. arxiv.org/abs/2406.12303
+    batch_size, _, _, _= latents.shape
+    alpha_t = noise_scheduler.alphas.to(timesteps.device)
+    alpha_t = alpha_t[timesteps]
+    alpha_t = alpha_t.view(batch_size, 1, 1, 1)
+    sqrt_alpha_t = torch.sqrt(alpha_t)
+    sqrt_one_minus_alpha_t = torch.sqrt(1 - alpha_t)
+    x_t_b = sqrt_alpha_t * latents + sqrt_one_minus_alpha_t * noise
+    return x_t_b
 
 def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps=None, train=True):
     # Sample noise that we'll add to the latents
-    noise = torch.randn_like(latents, device=latents.device)
+    if args.immiscible_noise and train:
+        # Generate immiscible noise
+        noise = immiscible_diffusion_get_noise_v2(args, latents, int(args.immiscible_noise))
+    else:
+        noise = torch.randn_like(latents, device=latents.device)
+
     if args.noise_offset and train:
         if args.noise_offset_random_strength:
             noise_offset = torch.rand(1, device=latents.device) * args.noise_offset
@@ -6110,9 +6158,11 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
 
     timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device, fixed_timesteps, train)
 
+    if args.immiscible_noise and False and train:
+        noisy_latents = immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps)
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
-    if args.ip_noise_gamma and train:
+    elif args.ip_noise_gamma and train:
         gamma_max = args.ip_noise_gamma
         gamma_min = float(getattr(args, 'ip_noise_gamma_scaling_min', 0.0))  # Default to 0.0 if not set
         exponent = float(getattr(args, 'ip_noise_gamma_scaling_exponent', 2.0))

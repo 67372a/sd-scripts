@@ -21,6 +21,7 @@ voluptuous==0.15.2
 # Breaking changes with newer versions
 huggingface-hub==0.25.2
 matplotlib
+scipy
 # for Image utils
 imagesize==1.4.1
 # for BLIP captioning
