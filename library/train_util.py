@@ -6158,7 +6158,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
 
     timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device, fixed_timesteps, train)
 
-    if args.immiscible_noise and False and train:
+    if args.immiscible_noise and args.immiscible_diffusion and train:
         noisy_latents = immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps)
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
