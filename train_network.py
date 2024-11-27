@@ -2035,7 +2035,7 @@ class NetworkTrainer:
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.edm2_loss_weighting:
-                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as)
+                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
                                     save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
 
                                 if args.save_state:
@@ -2342,7 +2342,7 @@ class NetworkTrainer:
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.edm2_loss_weighting:
-                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as)
+                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
                                     save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
 
                                 if args.save_state:
