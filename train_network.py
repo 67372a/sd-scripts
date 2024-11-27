@@ -394,7 +394,8 @@ class NetworkTrainer:
 
             # Plot the dynamic loss weights over time
             plt.figure(figsize=(10, 6))
-            plt.plot(timesteps.cpu().numpy(), loss.cpu().numpy(),
+            weighting = loss.cpu().numpy()
+            plt.plot(timesteps.cpu().numpy(), weighting,
                     label=f'Dynamic Loss Weight\nStep: {step}')
             plt.xlabel('Timesteps')
             plt.ylabel('Weight')
@@ -405,8 +406,22 @@ class NetworkTrainer:
             if args.edm2_loss_weighting_generate_graph_y_limit is not None:
                 plt.ylim(top=int(args.edm2_loss_weighting_generate_graph_y_limit))
             plt.xlim(left=0, right=num_timesteps)
-            plt.xticks(np.arange(0, num_timesteps+1, 100)) 
-            # plt.show()
+
+            # Set major ticks every 100
+            major_ticks = np.arange(0, 1000+1, 100)
+            minor_ticks = np.arange(0, 1000+1, 50)
+
+            # Set major ticks and labels
+            plt.xticks(major_ticks, [f'{x}\n({y:.2f})' for x, y in zip(major_ticks, [*weighting[::100], weighting[999]])])
+
+            # Set minor ticks
+            plt.xticks(minor_ticks, minor=True)
+
+            # Make minor ticks visible
+            plt.tick_params(which='minor', length=4)
+
+            # Adjust bottom margin
+            plt.subplots_adjust(bottom=0.15)
 
             try:
                 os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
