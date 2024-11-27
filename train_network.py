@@ -213,6 +213,59 @@ class NetworkTrainer:
 
     def shift_scale_latents(self, args, latents):
         return latents * self.vae_scale_factor
+    
+    def sangoi_loss_modifier(self, 
+                               timesteps: torch.Tensor, 
+                               predicted: torch.Tensor, 
+                               target: torch.Tensor, 
+                               noise_scheduler,
+                               min_snr: float = 1e-4,
+                               max_snr: float = 100) -> torch.Tensor:
+        """
+        Source: https://github.com/sangoi-exe/sangoi-loss-function
+        
+        Computes a loss modifier based on the Mean Absolute Percentage Error (MAPE) and the Signal-to-Noise Ratio (SNR).
+        This modifier adjusts the loss according to the prediction accuracy and the difficulty of the prediction task.
+
+        Args:
+            timesteps (Tensor): The current training step's timesteps.
+            predicted (Tensor): Predicted values from the neural network.
+            target (Tensor): Ground truth target values.
+            noise_scheduler:
+            min_snr (float):
+            max_snr (float):
+
+        Returns:
+            Tensor: A tensor of weights per example to modify the loss.
+        """
+
+        # Define minimum and maximum SNR values to clamp extreme values
+        #min_snr = 1e-4
+        #max_snr = 100
+
+        # Obtain the SNR for each timestep
+        snr = noise_scheduler.all_snr[timesteps]
+        # Clamp the SNR values to the defined range to avoid extreme values
+        snr = torch.clamp(snr, min=min_snr, max=max_snr)
+
+        # Define a small epsilon to prevent division by zero
+        epsilon = 1e-8
+        # Compute the Mean Absolute Percentage Error (MAPE)
+        mape = torch.abs((target - predicted) / (target + epsilon))
+        # Normalize MAPE values between 0 and 1
+        mape = torch.clamp(mape, min=0, max=1)
+        # Calculate the average MAPE per example across spatial dimensions
+        mape = mape.mean(dim=[1, 2, 3])
+
+        # Compute the SNR weight using the natural logarithm (adding 1 to avoid log(0))
+        snr_weight = torch.log(snr + 1)
+        # Invert MAPE to represent accuracy instead of error
+        mape_reward = 1 - mape
+        # Calculate the combined weight using the negative exponential of the product of MAPE reward and SNR weight
+        combined_weight = torch.exp(-mape_reward * snr_weight)
+
+        # Return the tensor of weights per example to modify the loss
+        return combined_weight
 
     def get_noise_pred_and_target(
         self,
@@ -2229,6 +2282,7 @@ class NetworkTrainer:
                         loss = train_util.conditional_loss(
                             noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
                         )
+
                         if weighting is not None:
                             loss = loss * weighting
                         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -2237,6 +2291,14 @@ class NetworkTrainer:
 
                         loss_weights = batch["loss_weights"]  # 各sampleごとのweight
                         loss = loss * loss_weights
+
+                        if args.sangoi_loss_modifier:
+                            loss = loss * self.sangoi_loss_modifier(timesteps, 
+                                                                    noise_pred, 
+                                                                    target, 
+                                                                    noise_scheduler,
+                                                                    float(args.sangoi_loss_modifier_min_snr),
+                                                                    float(args.sangoi_loss_modifier_max_snr))
 
                         # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                         loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
@@ -2807,6 +2869,26 @@ def setup_parser() -> argparse.ArgumentParser:
             "--immiscible_diffusion",
             action="store_true",
             help="Use immiscible diffusion to generate noised latents instead of standard noise scheduler. Mutually exclusive with ip noise gamma.",
+        )
+    
+    parser.add_argument(
+            "--sangoi_loss_modifier",
+            action="store_true",
+            help="Apply sangoi loss modifier to loss.",
+        )
+    
+    parser.add_argument(
+            "--sangoi_loss_modifier_min_snr",
+            type=float,
+            default=1e-4,
+            help="Min SNR limit for sangoi loss modifier.",
+        )
+    
+    parser.add_argument(
+            "--sangoi_loss_modifier_max_snr",
+            type=float,
+            default=100,
+            help="Max SNR limit for sangoi loss modifier.",
         )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
