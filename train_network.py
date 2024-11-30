@@ -1599,7 +1599,8 @@ class NetworkTrainer:
                                             dtype=weight_dtype)
             accelerator.register_for_checkpointing(grad_filter)
 
-        print("args.max_grad_norm="+ str(args.max_grad_norm))
+        if args.sangoi_loss_modifier and args.zero_terminal_snr:
+                logger.warning("As zero terminal SNR is set, setting min snr for sangoi loss modifier to zero.")
 
         if train_util.is_sam_optimizer(args):
             for epoch in range(epoch_to_start, num_train_epochs):
@@ -2308,11 +2309,17 @@ class NetworkTrainer:
                         loss = loss * loss_weights
 
                         if args.sangoi_loss_modifier:
+                            # Min SNR should be zero for zero_terminal_snr
+                            if args.zero_terminal_snr:
+                                min_snr = 0
+                            else:
+                                min_snr = float(args.sangoi_loss_modifier_min_snr)
+
                             loss = loss * self.sangoi_loss_modifier(timesteps, 
                                                                     noise_pred, 
                                                                     target, 
                                                                     noise_scheduler,
-                                                                    float(args.sangoi_loss_modifier_min_snr),
+                                                                    min_snr,
                                                                     float(args.sangoi_loss_modifier_max_snr))
 
                         # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
