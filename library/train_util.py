@@ -5040,10 +5040,6 @@ def get_optimizer(args, trainable_params):
 
             optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
             optimizer = optimizer_class(trainable_params, base_optimizer_class, lr=lr, **optimizer_kwargs)
-
-            # for logging
-            optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
-            optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
         else:
             optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
