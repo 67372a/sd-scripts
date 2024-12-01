@@ -424,6 +424,7 @@ class NetworkTrainer:
                     label=f'Dynamic Loss Weight\nStep: {step}')
             plt.xlabel('Timesteps')
             plt.ylabel('Weight')
+            plt.yscale(args.edm2_loss_weighting_generate_graph_y_scale)
             plt.title('Dynamic Loss Weighting vs Timesteps')
             plt.legend()
             plt.grid(True)
@@ -2881,6 +2882,14 @@ def setup_parser() -> argparse.ArgumentParser:
         help="""Set the max limit of the y axis, if not set, uses dynamic scaling of the y-axis, which can make it harder to follow. 
         6 is a good value for v-pred + ztsnr without any augmentation (i.e. low min snr gamma, debiased loss, or scaled v-pred loss). 
         If any of the noted augmentations are used, weighting values can reach ~100-150.""",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_generate_graph_y_scale",
+        type=str,
+        default="linear",
+        choices=["linear", "log"],
+        help="""Select between linear or log scaling for the y-axis.""",
     )
 
     parser.add_argument(
