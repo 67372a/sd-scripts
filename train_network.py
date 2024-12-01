@@ -269,7 +269,7 @@ class NetworkTrainer:
         #max_snr = 100
 
         # Obtain the SNR for each timestep
-        snr = noise_scheduler.all_snr[timesteps]
+        snr = noise_scheduler.all_snr[timesteps.long()]
         # Clamp the SNR values to the defined range to avoid extreme values
         snr = torch.clamp(snr, min=min_snr, max=max_snr)
 

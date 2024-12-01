@@ -69,6 +69,7 @@ class AdaptiveLossWeightMLP(nn.Module):
         return self.logvar_linear(self.logvar_fourier(c_noise)).squeeze()
 
     def forward(self, loss: torch.Tensor, timesteps):
+        timesteps = timesteps.long()
         adaptive_loss_weights = self._forward(timesteps)
         loss_scaled = loss * (self.lambda_weights[timesteps] / torch.exp(adaptive_loss_weights)) # type: torch.Tensor
         loss = loss_scaled + adaptive_loss_weights # type: torch.Tensor
