@@ -8,7 +8,7 @@ einops==0.8.0
 pytorch-lightning==2.4.0
 bitsandbytes==0.44.1
 prodigyopt==1.0
-lion-pytorch==0.2.2
+lion-pytorch==0.2.3
 schedulefree==1.3
 tensorboard
 safetensors==0.4.5
