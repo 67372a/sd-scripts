@@ -471,7 +471,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 )
                 target[diff_output_pr_indices] = model_pred_prior.to(target.dtype)
 
-        return model_pred, target, timesteps, None, weighting, None
+        return model_pred, target, timesteps, weighting, None
 
     def post_process_loss(self, loss, args, timesteps, noise_scheduler, train=True):
         return loss

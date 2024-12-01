@@ -4021,7 +4021,16 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--huber_c",
         type=float,
         default=0.1,
-        help="The huber loss parameter. Only used if one of the huber loss modes (huber or smooth l1) is selected with loss_type. default is 0.1 / Huber損失のパラメータ。loss_typeがhuberまたはsmooth l1の場合に有効。デフォルトは0.1",
+        help="The Huber loss decay parameter. Only used if one of the huber loss modes (huber or smooth l1) is selected with loss_type. default is 0.1"
+        " / Huber損失の減衰パラメータ。loss_typeがhuberまたはsmooth l1の場合に有効。デフォルトは0.1",
+    )
+
+    parser.add_argument(
+        "--huber_scale",
+        type=float,
+        default=1.0,
+        help="The Huber loss scale parameter. Only used if one of the huber loss modes (huber or smooth l1) is selected with loss_type. default is 1.0"
+        " / Huber損失のスケールパラメータ。loss_typeがhuberまたはsmooth l1の場合に有効。デフォルトは1.0",
     )
 
     parser.add_argument(
@@ -5004,21 +5013,10 @@ def get_optimizer(args, trainable_params):
             optimizer_class = sf.SGDScheduleFree
             logger.info(f"use SGDScheduleFree optimizer | {optimizer_kwargs}")
         else:
-            # 任意のoptimizerを使う
-            case_sensitive_optimizer_type = args.optimizer_type  # not lower
-            logger.info(f"use {case_sensitive_optimizer_type} | {optimizer_kwargs}")
+            optimizer_class = None
 
-            if "." not in case_sensitive_optimizer_type:  # from torch.optim
-                optimizer_module = torch.optim
-            else:  # from other library
-                values = case_sensitive_optimizer_type.split(".")
-                optimizer_module = importlib.import_module(".".join(values[:-1]))
-                case_sensitive_optimizer_type = values[-1]
-
-            optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
-        # make optimizer as train mode: we don't need to call train again, because eval will not be called in training loop
-        optimizer.train()
+        if optimizer_class is not None:
+            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     if optimizer is None:
         # 任意のoptimizerを使う
@@ -5046,14 +5044,9 @@ def get_optimizer(args, trainable_params):
             # for logging
             optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
             optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
-
-            if case_sensitive_optimizer_type.lower() == "schedulefreewrapper":
-                optimizer.train()
-
-            return optimizer_name, optimizer_args, optimizer
-
-        optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+        else:
+            optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
+            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     """
     # wrap any of above optimizer with schedulefree, if optimizer is not schedulefree
@@ -5139,6 +5132,10 @@ def get_optimizer(args, trainable_params):
     # for logging
     optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
     optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
+
+    if hasattr(optimizer, "train") and callable(optimizer.train):
+        # make optimizer as train mode before training for schedulefree optimizer. the optimizer will be in eval mode in sampling and saving.
+        optimizer.train()
 
     return optimizer_name, optimizer_args, optimizer
 
@@ -6059,35 +6056,10 @@ def save_sd_model_on_train_end_common(
         if args.huggingface_repo_id is not None:
             huggingface_util.upload(args, out_dir, "/" + model_name, force_sync_upload=True)
 
-
-def get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, device, fixed_timesteps=None, train=True):
-
-    if fixed_timesteps is None:
-        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=device)
-    else:
-        timesteps = fixed_timesteps
-
-    if (args.loss_type == "huber" or args.loss_type == "smooth_l1") and train == True:
-        if args.huber_schedule == "exponential":
-            alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
-            huber_c = torch.exp(-alpha * timesteps)
-        elif args.huber_schedule == "snr":
-            alphas_cumprod = noise_scheduler.alphas_cumprod.to(device)
-            alphas_cumprod = torch.index_select(alphas_cumprod, 0, timesteps)
-            sigmas = ((1.0 - alphas_cumprod) / alphas_cumprod) ** 0.5
-            huber_c = (1 - args.huber_c) / (1 + sigmas) ** 2 + args.huber_c
-        elif args.huber_schedule == "constant":
-            huber_c = torch.full((b_size,), args.huber_c)
-        else:
-            raise NotImplementedError(f"Unknown Huber loss schedule {args.huber_schedule}!")
-        huber_c = huber_c.to(device)
-    elif args.loss_type == "l2" or train == False:
-        huber_c = None  # may be anything, as it's not used
-    else:
-        raise NotImplementedError(f"Unknown loss type {args.loss_type}")
-
+def get_timesteps(min_timestep, max_timestep, b_size, device):
+    timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
     timesteps = timesteps.long().to(device)
-    return timesteps, huber_c
+    return timesteps
 
 # https://github.com/yhli123/Immiscible-Diffusion/blob/main/stable_diffusion/conditional_ft_train_sd.py#L941
 def immiscible_diffusion_get_noise_v2(args, latents:torch.Tensor, n: int = None):
@@ -6156,7 +6128,10 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
     min_timestep = 0 if args.min_timestep is None else args.min_timestep
     max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
 
-    timesteps, huber_c = get_timesteps_and_huber_c(args, min_timestep, max_timestep, noise_scheduler, b_size, latents.device, fixed_timesteps, train)
+    if fixed_timesteps is not None:
+        timesteps = fixed_timesteps
+    else:
+        timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
 
     if args.immiscible_noise and args.immiscible_diffusion and train:
         noisy_latents = immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps)
@@ -6230,11 +6205,34 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
     else:
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-    return noise, noisy_latents, timesteps, huber_c
+    return noise, noisy_latents, timesteps
+
+
+def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler) -> Optional[torch.Tensor]:
+    if not (args.loss_type == "huber" or args.loss_type == "smooth_l1"):
+        return None
+
+    b_size = timesteps.shape[0]
+    if args.huber_schedule == "exponential":
+        alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
+        result = torch.exp(-alpha * timesteps) * args.huber_scale
+    elif args.huber_schedule == "snr":
+        if not hasattr(noise_scheduler, "alphas_cumprod"):
+            raise NotImplementedError("Huber schedule 'snr' is not supported with the current model.")
+        alphas_cumprod = torch.index_select(noise_scheduler.alphas_cumprod, 0, timesteps.cpu())
+        sigmas = ((1.0 - alphas_cumprod) / alphas_cumprod) ** 0.5
+        result = (1 - args.huber_c) / (1 + sigmas) ** 2 + args.huber_c
+        result = result.to(timesteps.device)
+    elif args.huber_schedule == "constant":
+        result = torch.full((b_size,), args.huber_c * args.huber_scale, device=timesteps.device)
+    else:
+        raise NotImplementedError(f"Unknown Huber loss schedule {args.huber_schedule}!")
+
+    return result
 
 
 def conditional_loss(
-    model_pred: torch.Tensor, target: torch.Tensor, reduction: str, loss_type: str, huber_c: Optional[torch.Tensor]
+    model_pred: torch.Tensor, target: torch.Tensor, loss_type: str, reduction: str, huber_c: Optional[torch.Tensor] = None
 ):
     if loss_type == "l2":
         loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
@@ -6255,7 +6253,7 @@ def conditional_loss(
         elif reduction == "sum":
             loss = torch.sum(loss)
     else:
-        raise NotImplementedError(f"Unsupported Loss Type {loss_type}")
+        raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
 
 
@@ -6265,7 +6263,7 @@ def append_lr_to_logs(logs, lr_scheduler, optimizer_type, including_unet=True):
         names.append("unet")
     names.append("text_encoder1")
     names.append("text_encoder2")
-    names.append("text_encoder3") # SD3
+    names.append("text_encoder3")  # SD3
 
     append_lr_to_logs_with_names(logs, lr_scheduler, optimizer_type, names)
 
