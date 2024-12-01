@@ -364,7 +364,7 @@ class NetworkTrainer:
         return noise_pred, target, timesteps, None, noisy_latents
 
     def post_process_loss(self, loss, args, timesteps, noise_scheduler, train=True):
-        if args.min_snr_gamma and train:
+        if args.min_snr_gamma and train and not args.sangoi_loss_modifier:
             loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
         if args.scale_v_pred_loss_like_noise_pred and train:
             loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
@@ -1624,8 +1624,11 @@ class NetworkTrainer:
                                             dtype=weight_dtype)
             accelerator.register_for_checkpointing(grad_filter)
 
-        if args.sangoi_loss_modifier and args.zero_terminal_snr:
+        if args.sangoi_loss_modifier:
+            if args.zero_terminal_snr:
                 logger.warning("As zero terminal SNR is set, setting min snr for sangoi loss modifier to zero.")
+            if args.min_snr_gamma:
+                logger.warning("Min snr gamma and sangoi loss modification both limit the max snr, ignoring min snr gamma in favor of sangoi.")
 
         if train_util.is_sam_optimizer(args):
             for epoch in range(epoch_to_start, num_train_epochs):
@@ -1999,10 +2002,9 @@ class NetworkTrainer:
                                             weight_dtype,
                                         )
 
-                                    # Recompute loss
-                                    loss = train_util.conditional_loss(
-                                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
-                                    )
+                                    huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                                    # Compute loss
+                                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
                                     if weighting is not None:
                                         loss = loss * weighting
                                     if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -2339,8 +2341,8 @@ class NetworkTrainer:
                                 min_snr = float(args.sangoi_loss_modifier_min_snr)
 
                             loss = loss * self.sangoi_loss_modifier(timesteps, 
-                                                                    noise_pred, 
-                                                                    target, 
+                                                                    noise_pred.float(), 
+                                                                    target.float(), 
                                                                     noise_scheduler,
                                                                     min_snr,
                                                                     float(args.sangoi_loss_modifier_max_snr))
