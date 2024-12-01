@@ -6211,7 +6211,7 @@ def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler
     b_size = timesteps.shape[0]
     if args.huber_schedule == "exponential":
         alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
-        result = torch.exp(-alpha * timesteps) * args.huber_scale
+        result = torch.exp(-alpha * timesteps) * float(args.huber_scale)
     elif args.huber_schedule == "snr":
         if not hasattr(noise_scheduler, "alphas_cumprod"):
             raise NotImplementedError("Huber schedule 'snr' is not supported with the current model.")
@@ -6220,7 +6220,7 @@ def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler
         result = (1 - args.huber_c) / (1 + sigmas) ** 2 + args.huber_c
         result = result.to(timesteps.device)
     elif args.huber_schedule == "constant":
-        result = torch.full((b_size,), args.huber_c * args.huber_scale, device=timesteps.device)
+        result = torch.full((b_size,), args.huber_c * float(args.huber_scale), device=timesteps.device)
     else:
         raise NotImplementedError(f"Unknown Huber loss schedule {args.huber_schedule}!")
 
