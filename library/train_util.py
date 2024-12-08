@@ -5922,6 +5922,98 @@ def save_sd_model_on_epoch_end_or_stepwise_common(
         else:
             save_and_remove_state_stepwise(args, accelerator, global_step)
 
+def save_loss_weights_model_on_epoch_end_or_stepwise(
+    args: argparse.Namespace,
+    on_epoch_end: bool,
+    unwrapped_nw,
+    use_safetensors: bool,
+    epoch: int,
+    num_train_epochs: int,
+    global_step: int,
+):
+    if on_epoch_end:
+        epoch_no = epoch + 1
+        saving = epoch_no % args.save_every_n_epochs == 0 and epoch_no < num_train_epochs
+        if not saving:
+            return
+
+        remove_no = get_remove_epoch_no(args, epoch_no)
+    else:
+        # 保存するか否かは呼び出し側で判断済み
+
+        epoch_no = epoch  # 例: 最初のepochの途中で保存したら0になる、SDモデルに保存される
+        remove_no = get_remove_step_no(args, global_step)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    ext = ".safetensors" if use_safetensors else ".ckpt"
+
+    if on_epoch_end:
+        ckpt_name = get_epoch_loss_weights_ckpt_name(args, ext, epoch_no)
+    else:
+        ckpt_name = get_step_loss_weights_ckpt_name(args, ext, global_step)
+
+    ckpt_file = os.path.join(args.output_dir, ckpt_name)
+    logger.info("")
+    logger.info(f"saving loss weights checkpoint: {ckpt_file}")
+
+    metadata = {}
+
+    metadata["ss_training_finished_at"] = str(time.time())
+    metadata["ss_steps"] = str(global_step)
+    metadata["ss_epoch"] = str(epoch_no)
+
+    sai_metadata = get_sai_model_spec(args)
+    metadata.update(sai_metadata)
+
+    unwrapped_nw.save_weights(ckpt_file, torch.float32, metadata)
+
+    if args.huggingface_repo_id is not None:
+        huggingface_util.upload(args, ckpt_file, "/" + ckpt_name)
+
+    # remove older checkpoints
+    if remove_no is not None:
+        if on_epoch_end:
+            remove_ckpt_name = get_epoch_loss_weights_ckpt_name(args, ext, remove_no)
+        else:
+            remove_ckpt_name = get_step_loss_weights_ckpt_name(args, ext, remove_no)
+
+        remove_ckpt_file = os.path.join(args.output_dir, remove_ckpt_name)
+
+        try:
+            if os.path.exists(remove_ckpt_file):
+                logger.info(f"removing old loss weights checkpoint: {remove_ckpt_file}")
+                os.remove(remove_ckpt_file)
+        except Exception as e:
+            logger.warning(f"Failed to remove old loss weights checkpoint: {remove_ckpt_file}. Due to: {e}")
+
+def save_loss_weights_model_on_train_end(
+    args: argparse.Namespace,
+    use_safetensors: bool,
+    epoch: int,
+    global_step: int,
+    unwrapped_nw,
+):
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    ckpt_name = get_last_loss_weights_ckpt_name(args, (".safetensors" if use_safetensors else ".ckpt"))
+    ckpt_file = os.path.join(args.output_dir, ckpt_name)
+
+    logger.info(f"save loss weight model checkpoint to {ckpt_file}")
+    metadata = {}
+
+    metadata["ss_training_finished_at"] = str(time.time())
+    metadata["ss_steps"] = str(global_step)
+    metadata["ss_epoch"] = str(epoch)
+
+    sai_metadata = get_sai_model_spec(args)
+    metadata.update(sai_metadata)
+
+    unwrapped_nw.save_weights(ckpt_file, torch.float32, metadata)
+
+    if args.huggingface_repo_id is not None:
+        huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=True)
+
 
 def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator, epoch_no):
     model_name = default_if_none(args.output_name, DEFAULT_EPOCH_NAME)

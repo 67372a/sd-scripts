@@ -1125,6 +1125,13 @@ def train(args):
                             logit_scale,
                             ckpt_info,
                         )
+                        train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                                    False, 
+                                                                                    accelerator.unwrap_model(lossweightMLP),
+                                                                                    use_safetensors,
+                                                                                    epoch,
+                                                                                    num_train_epochs,
+                                                                                    global_step)
 
             current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -1187,6 +1194,13 @@ def train(args):
                     logit_scale,
                     ckpt_info,
                 )
+                train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                            True, 
+                                                                            accelerator.unwrap_model(lossweightMLP),
+                                                                            use_safetensors,
+                                                                            epoch,
+                                                                            num_train_epochs,
+                                                                            global_step)
 
         sdxl_train_util.sample_images(
             accelerator,
@@ -1230,6 +1244,7 @@ def train(args):
             logit_scale,
             ckpt_info,
         )
+        train_util.save_loss_weights_model_on_train_end(args, use_safetensors, epoch, global_step, accelerator.unwrap_model(lossweightMLP))
         logger.info("model saved.")
 
 
