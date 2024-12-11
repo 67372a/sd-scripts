@@ -5207,7 +5207,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
     Unified API to get any scheduler from its name.
     """
     # if schedulefree optimizer, return dummy scheduler
-    if args.optimizer_type.lower() not in {"ADOPTScheduleFree".lower()} and is_schedulefree_optimizer(optimizer, args):
+    if args.optimizer_type.lower().split(".")[-1] not in {"ADOPTScheduleFree".lower()} and is_schedulefree_optimizer(optimizer, args):
         return get_dummy_scheduler(optimizer)
     
     # Need to apply scheduler to base_optimizer
