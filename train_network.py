@@ -1594,11 +1594,8 @@ class NetworkTrainer:
             self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             if self.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
                 current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
-            else:
-                current_val_loss, average_val_loss, val_logs = None, None, None
             optimizer_train_fn()
-        else:
-            current_val_loss, average_val_loss, val_logs = None, None, None
+
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
@@ -2135,7 +2132,6 @@ class NetworkTrainer:
                         progress_bar.update(1)
                         global_step += 1
 
-
                         if (train_util.sample_images_check(args, None, global_step) or 
                             self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
@@ -2504,8 +2500,8 @@ class NetworkTrainer:
                                             remove_model(remove_loss_weights_ckpt_name)
 
                             optimizer_train_fn()
-                    else:
-                        current_val_loss, average_val_loss, val_logs = None, None, None
+                        else:
+                            current_val_loss, average_val_loss, val_logs = None, None, None
 
                     current_loss = loss.detach().item()
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
