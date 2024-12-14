@@ -400,6 +400,9 @@ class NetworkTrainer:
 
     # endregion
 
+    def plot_dynamic_loss_weighting_check(self, args, global_step):
+        return args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps)
+
     def plot_dynamic_loss_weighting(self, args, step, model, num_timesteps=1000, device="cpu"):
         """
         Plot the dynamic loss weighting across timesteps using the learned parameters of the DynamicLossModule.
@@ -458,6 +461,19 @@ class NetworkTrainer:
                 logger.warning(f"Failed to save weighting graph image. Due to: {e}")
 
             plt.close()
+
+    def calculate_val_loss_check(self, args, global_step, epoch_step, val_dataloader, train_dataloader) -> bool:
+        if global_step != 0 and global_step < args.max_train_steps:
+            if val_dataloader is None:
+                return False
+            else:
+                if args.validation_every_n_step is not None:
+                    if global_step % int(args.validation_every_n_step) != 0:
+                        return False
+                else:
+                    if epoch_step != len(train_dataloader) - 1:
+                        return False
+        return True
 
     def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
         total_loss = 0.0
@@ -1573,11 +1589,14 @@ class NetworkTrainer:
         max_mean_logs = {}
 
         # For --sample_at_first
-        optimizer_eval_fn()
-        self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-        if cyclic_val_dataloader is not None:
-            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
-        optimizer_train_fn()
+        if train_util.sample_images_check(args, 0, global_step) or self.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+            optimizer_eval_fn()
+            self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+            if self.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+            else:
+                current_val_loss, average_val_loss, val_logs = None, None, None
+            optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
@@ -2114,37 +2133,43 @@ class NetworkTrainer:
                         progress_bar.update(1)
                         global_step += 1
 
-                        optimizer_eval_fn()
-                        self.sample_images(
-                            accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
-                        )
 
-                        if cyclic_val_dataloader is not None:
-                            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                        if (train_util.sample_images_check(args, None, global_step) or 
+                            self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
+                            args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
+                            optimizer_eval_fn()                        
+                            self.sample_images(
+                                accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+                            )
 
-                        # 指定ステップごとにモデルを保存
-                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                            accelerator.wait_for_everyone()
-                            if accelerator.is_main_process:
-                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                            if self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
+                                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                            else:
+                                current_val_loss, average_val_loss, val_logs = None, None, None
 
-                                if args.edm2_loss_weighting:
-                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
-                                    save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
-
-                                if args.save_state:
-                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
-
-                                remove_step_no = train_util.get_remove_step_no(args, global_step)
-                                if remove_step_no is not None:
-                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                    remove_model(remove_ckpt_name)
+                            # 指定ステップごとにモデルを保存
+                            if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                                accelerator.wait_for_everyone()
+                                if accelerator.is_main_process:
+                                    ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                     if args.edm2_loss_weighting:
-                                        remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                        remove_model(remove_loss_weights_ckpt_name)
-                        optimizer_train_fn()
+                                        loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
+                                        save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
+
+                                    if args.save_state:
+                                        train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                                    remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                    if remove_step_no is not None:
+                                        remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                        remove_model(remove_ckpt_name)
+
+                                        if args.edm2_loss_weighting:
+                                            remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                            remove_model(remove_loss_weights_ckpt_name)
+                            optimizer_train_fn()
 
                     current_loss = loss.detach().item() / grad_accum_loss_scaling  # Multiply back since we divided earlier
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -2188,32 +2213,34 @@ class NetworkTrainer:
                             
                 accelerator.wait_for_everyone()
 
-                # 指定エポックごとにモデルを保存
-                optimizer_eval_fn()
-                if args.save_every_n_epochs is not None:
-                    saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
-                    if is_main_process and saving:
-                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
-
-                        if args.edm2_loss_weighting:
-                            loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                            save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
-
-                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
-                        if remove_epoch_no is not None:
-                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                            remove_model(remove_ckpt_name)
+                if (train_util.sample_images_check(args, epoch + 1, global_step) or 
+                    args.save_every_n_epochs is not None):
+                    # 指定エポックごとにモデルを保存
+                    optimizer_eval_fn()
+                    if args.save_every_n_epochs is not None:
+                        saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                        if is_main_process and saving:
+                            ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
                             if args.edm2_loss_weighting:
-                                remove_loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                                remove_model(remove_loss_weights_ckpt_name)
+                                loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                                save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
 
-                        if args.save_state:
-                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-                
-                self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-                optimizer_train_fn()
+                            remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                            if remove_epoch_no is not None:
+                                remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                                remove_model(remove_ckpt_name)
+
+                                if args.edm2_loss_weighting:
+                                    remove_loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                                    remove_model(remove_loss_weights_ckpt_name)
+
+                            if args.save_state:
+                                train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                    
+                    self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+                    optimizer_train_fn()
 
                 # end of epoch
 
@@ -2432,42 +2459,47 @@ class NetworkTrainer:
                         progress_bar.update(1)
                         global_step += 1
 
-                        optimizer_eval_fn()
-
-                        if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
+                        if self.plot_dynamic_loss_weighting_check(args, global_step):
                             self.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
-                        self.sample_images(
-                            accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
-                        )
+                        if (train_util.sample_images_check(args, None, global_step) or 
+                            self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
+                            args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
+                            optimizer_eval_fn()
 
-                        if cyclic_val_dataloader is not None:
-                            current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                            self.sample_images(
+                                accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+                            )
 
-                        # 指定ステップごとにモデルを保存
-                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                            accelerator.wait_for_everyone()
-                            if accelerator.is_main_process:
-                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                            if self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
+                                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                            else:
+                                current_val_loss, average_val_loss, val_logs = None, None, None
 
-                                if args.edm2_loss_weighting:
-                                    loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
-                                    save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
-
-                                if args.save_state:
-                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
-
-                                remove_step_no = train_util.get_remove_step_no(args, global_step)
-                                if remove_step_no is not None:
-                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                    remove_model(remove_ckpt_name)
+                            # 指定ステップごとにモデルを保存
+                            if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                                accelerator.wait_for_everyone()
+                                if accelerator.is_main_process:
+                                    ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                     if args.edm2_loss_weighting:
-                                        remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                        remove_model(remove_loss_weights_ckpt_name)
+                                        loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
+                                        save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
 
-                        optimizer_train_fn()
+                                    if args.save_state:
+                                        train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                                    remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                    if remove_step_no is not None:
+                                        remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                        remove_model(remove_ckpt_name)
+
+                                        if args.edm2_loss_weighting:
+                                            remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                            remove_model(remove_loss_weights_ckpt_name)
+
+                            optimizer_train_fn()
 
                     current_loss = loss.detach().item()
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -2511,33 +2543,35 @@ class NetworkTrainer:
                                 
                 accelerator.wait_for_everyone()
 
-                # 指定エポックごとにモデルを保存
-                optimizer_eval_fn()
+                if (train_util.sample_images_check(args, epoch + 1, global_step) or 
+                    args.save_every_n_epochs is not None):
+                    # 指定エポックごとにモデルを保存
+                    optimizer_eval_fn()
 
-                if args.save_every_n_epochs is not None:
-                    saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
-                    if is_main_process and saving:
-                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
-
-                        if args.edm2_loss_weighting:
-                            loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                            save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
-
-                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
-                        if remove_epoch_no is not None:
-                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                            remove_model(remove_ckpt_name)
+                    if args.save_every_n_epochs is not None:
+                        saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                        if is_main_process and saving:
+                            ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
                             if args.edm2_loss_weighting:
-                                remove_loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                                remove_model(remove_loss_weights_ckpt_name)
+                                loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                                save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
 
-                        if args.save_state:
-                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-                
-                self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-                optimizer_train_fn()
+                            remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                            if remove_epoch_no is not None:
+                                remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                                remove_model(remove_ckpt_name)
+
+                                if args.edm2_loss_weighting:
+                                    remove_loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                                    remove_model(remove_loss_weights_ckpt_name)
+
+                            if args.save_state:
+                                train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                    
+                    self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+                    optimizer_train_fn()
 
                 # end of epoch
 
