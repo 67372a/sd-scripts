@@ -1597,6 +1597,8 @@ class NetworkTrainer:
             else:
                 current_val_loss, average_val_loss, val_logs = None, None, None
             optimizer_train_fn()
+        else:
+            current_val_loss, average_val_loss, val_logs = None, None, None
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
@@ -2170,6 +2172,8 @@ class NetworkTrainer:
                                             remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                             remove_model(remove_loss_weights_ckpt_name)
                             optimizer_train_fn()
+                        else:
+                            current_val_loss, average_val_loss, val_logs = None, None, None
 
                     current_loss = loss.detach().item() / grad_accum_loss_scaling  # Multiply back since we divided earlier
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -2500,6 +2504,8 @@ class NetworkTrainer:
                                             remove_model(remove_loss_weights_ckpt_name)
 
                             optimizer_train_fn()
+                    else:
+                        current_val_loss, average_val_loss, val_logs = None, None, None
 
                     current_loss = loss.detach().item()
                     loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
