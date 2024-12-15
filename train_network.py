@@ -463,16 +463,16 @@ class NetworkTrainer:
             plt.close()
 
     def calculate_val_loss_check(self, args, global_step, epoch_step, val_dataloader, train_dataloader) -> bool:
+        if val_dataloader is None:
+            return False
+
         if global_step != 0 and global_step < args.max_train_steps:
-            if val_dataloader is None:
-                return False
+            if args.validation_every_n_step is not None:
+                if global_step % int(args.validation_every_n_step) != 0:
+                    return False
             else:
-                if args.validation_every_n_step is not None:
-                    if global_step % int(args.validation_every_n_step) != 0:
-                        return False
-                else:
-                    if epoch_step != len(train_dataloader) - 1:
-                        return False
+                if epoch_step != len(train_dataloader) - 1:
+                    return False
         return True
 
     def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
@@ -603,17 +603,9 @@ class NetworkTrainer:
                            accelerator, 
                            args, 
                            train_text_encoder=True):
-        if global_step != 0 and global_step < args.max_train_steps:
-            if val_dataloader is None:
-                return None, None, None
-            else:
-                if args.validation_every_n_step is not None:
-                    if global_step % int(args.validation_every_n_step) != 0:
-                        return None, None, None
-                else:
-                    if epoch_step != len(train_dataloader) - 1:
-                        return None, None, None
-                    
+        if not self.calculate_val_loss_check(args,global_step,epoch_step,val_dataloader,train_dataloader):
+            return None, None, None
+   
         # Get current seeds from all random number generators
         python_state = random.getstate()
         numpy_state = np.random.get_state()
