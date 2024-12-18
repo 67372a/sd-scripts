@@ -191,7 +191,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 args.skip_cache_check,
                 is_partial=self.train_clip_l or self.train_t5xxl,
                 apply_t5_attn_mask=args.apply_t5_attn_mask,
-                vision_cond_ratio=args.vision_cond_ratio,
+                vision_cond_ratio=float(args.vision_cond_ratio),
                 redux_path=args.redux_model_path
             )
         else:
@@ -378,8 +378,9 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         if not args.apply_t5_attn_mask:
             t5_attn_mask = None
 
-        if args.vision_cond_dropout < 1.0:
-            if random.uniform(0,1) > args.vision_cond_dropout:
+        vision_cond_dropout = float(args.vision_cond_dropout)
+        if vision_cond_dropout < 1.0:
+            if random.uniform(0,1) > vision_cond_dropout:
                 vision_encoder_conds = batch.get("vision_encoder_outputs_list", None)
                 vis_t5_out, vis_txt_ids = vision_encoder_conds
                 t5_out = vis_t5_out
