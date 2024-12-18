@@ -1749,8 +1749,9 @@ class NetworkTrainer:
                             )
 
                             huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                            gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                             # Compute loss
-                            loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                            loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
                             if weighting is not None:
                                 loss = loss * weighting
                             if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -1873,8 +1874,9 @@ class NetworkTrainer:
                         )
 
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                        gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
-                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
                         if weighting is not None:
                             loss = loss * weighting
                         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -1959,9 +1961,10 @@ class NetworkTrainer:
                                                 weight_dtype,
                                             )
 
+                                        gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                                         # Recompute loss
                                         loss = train_util.conditional_loss(
-                                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c, gamma=gamma
                                         )
                                         if weighting is not None:
                                             loss = loss * weighting
@@ -2014,8 +2017,9 @@ class NetworkTrainer:
                                         )
 
                                     huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                                    gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                                     # Compute loss
-                                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
                                     if weighting is not None:
                                         loss = loss * weighting
                                     if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -2341,8 +2345,9 @@ class NetworkTrainer:
                         )
 
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                        gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
-                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
 
                         if weighting is not None:
                             loss = loss * weighting
@@ -2973,6 +2978,28 @@ def setup_parser() -> argparse.ArgumentParser:
             type=float,
             default=100,
             help="Max SNR limit for sangoi loss modifier.",
+        )
+    
+    parser.add_argument(
+            "--l0_loss_gamma_max",
+            type=float,
+            default=2.0,
+            help="Max / initial gamma for l0 loss.",
+        )
+    
+    parser.add_argument(
+            "--l0_loss_gamma_min",
+            type=float,
+            default=0.0,
+            help="Min / final gamma for l0 loss.",
+        )
+    
+    parser.add_argument(
+            "--l0_loss_gamma_decay_schedule",
+            type=str,
+            default="linear",
+            choices=["linear", "exponential", "cosine"],
+            help="Decay schedule for l0 loss gamma decay.",
         )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
