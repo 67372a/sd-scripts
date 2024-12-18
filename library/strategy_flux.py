@@ -201,7 +201,7 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         bsz = txt_ids.shape[0]
         imgs = [PIL.Image.open(nfo.absolute_path) for nfo in infos]
         siglip_in = siglip_processor(images=imgs, padding="max_length", return_tensors="pt")
-        siglip_in = siglip_in.to(dtype=torch.bfloat16, device="cuda")
+        siglip_in = siglip_in.to(dtype=torch.float32, device="cuda")
 
         with torch.no_grad(), torch.autocast("cuda"):
             siglip_out = siglip_model(**siglip_in)
