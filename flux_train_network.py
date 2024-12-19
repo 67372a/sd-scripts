@@ -378,14 +378,16 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         if not args.apply_t5_attn_mask:
             t5_attn_mask = None
 
-        vision_cond_dropout = float(args.vision_cond_dropout)
-        if vision_cond_dropout < 1.0:
-            if random.uniform(0,1) > vision_cond_dropout:
-                vision_encoder_conds = batch.get("vision_encoder_outputs_list", None)
-                vis_t5_out, vis_txt_ids = vision_encoder_conds
-                t5_out = vis_t5_out
-                txt_ids = vis_txt_ids
-                t5_attn_mask = None
+        if args.redux_model_path and train:
+            vision_cond_ratio = float(args.vision_cond_ratio)
+            vision_cond_dropout = float(args.vision_cond_dropout)
+            if vision_cond_dropout < 1.0 and vision_cond_ratio > 0.0:
+                if random.uniform(0,1) > vision_cond_dropout:
+                    vision_encoder_conds = batch.get("vision_encoder_outputs_list", None)
+                    vis_t5_out, vis_txt_ids = vision_encoder_conds
+                    t5_out = vis_t5_out
+                    txt_ids = vis_txt_ids
+                    t5_attn_mask = None
 
         def call_dit(img, img_ids, t5_out, txt_ids, l_pooled, timesteps, guidance_vec, t5_attn_mask):
             # if not args.split_mode:
