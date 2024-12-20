@@ -56,6 +56,66 @@ import itertools
 
 logger = logging.getLogger(__name__)
 
+@torch.no_grad()
+def analyze_gradient_norms(parameters):
+    """
+    Comprehensive analysis of gradient norms from model parameters.
+    
+    Args:
+        parameters: An iterable of parameters with gradients (e.g., model.parameters())
+        
+    Returns:
+        dict: Dictionary containing various gradient statistics
+    """
+    # Extract gradient norms and zero gradients count
+    grad_norms = []
+    
+    for param in parameters:
+        if param.grad is not None:
+            grad = param.grad
+            # Count zeros, infs, and nans
+
+            norm = torch.norm(grad).item()
+            if not (np.isnan(norm) or np.isinf(norm)):
+                grad_norms.append(norm)
+    
+    if not grad_norms:
+        return {
+                'train/grad_norm/mean': 0.0,
+                'train/grad_norm/median': 0.0,
+                'train/grad_norm/std': 0.0,
+                'train/grad_norm/min': 0.0,
+                'train/grad_norm/max': 0.0,
+                'train/grad_norm/p10': 0.0,
+                'train/grad_norm/p25': 0.0,
+                'train/grad_norm/p75': 0.0,
+                'train/grad_norm/p90': 0.0,
+                'train/grad_norm/p95': 0.0,
+                'train/grad_norm/p98': 0.0,
+                'train/grad_norm/p99': 0.0,
+            }
+    
+    # Convert to numpy array for calculations
+    grad_norms = np.array(grad_norms)
+    
+    # Basic statistics
+    stats = {
+        'train/grad_norm/mean': float(np.mean(grad_norms)),
+        'train/grad_norm/median': float(np.median(grad_norms)),
+        'train/grad_norm/std': float(np.std(grad_norms)),
+        'train/grad_norm/min': float(np.min(grad_norms)),
+        'train/grad_norm/max': float(np.max(grad_norms)),
+        'train/grad_norm/p10': float(np.percentile(grad_norms, 10)),  # Lower tail
+        'train/grad_norm/p25': float(np.percentile(grad_norms, 25)),  # First quartile
+        'train/grad_norm/p75': float(np.percentile(grad_norms, 75)),  # Third quartile
+        'train/grad_norm/p90': float(np.percentile(grad_norms, 90)),
+        'train/grad_norm/p95': float(np.percentile(grad_norms, 95)),
+        'train/grad_norm/p98': float(np.percentile(grad_norms, 98)),
+        'train/grad_norm/p99': float(np.percentile(grad_norms, 99)),
+    }
+    
+    return stats
+
 class NetworkTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215
@@ -81,7 +141,8 @@ class NetworkTrainer:
         average_loss_scaled=None,
         edm2_grad_norm=None,
         edm2_grad_norm_clipped=None,
-        edm2_lr_scheduler=None
+        edm2_lr_scheduler=None,
+        gradient_stats=None,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
 
@@ -105,6 +166,9 @@ class NetworkTrainer:
         if edm2_grad_norm is not None:
             logs["train/edm2_grad_norm"] = edm2_grad_norm
             logs["train/edm2_grad_norm_clipped"] = edm2_grad_norm_clipped
+
+        if gradient_stats:
+            logs = {**logs, **gradient_stats}
 
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
@@ -1579,6 +1643,20 @@ class NetworkTrainer:
         current_val_loss, average_val_loss, val_logs = None, None, {}
         keys_scaled, mean_norm, maximum_norm = None, None, None
         max_mean_logs = {}
+        gradient_stats = {
+                'train/grad_norm/mean': 0.0,
+                'train/grad_norm/median': 0.0,
+                'train/grad_norm/std': 0.0,
+                'train/grad_norm/min': 0.0,
+                'train/grad_norm/max': 0.0,
+                'train/grad_norm/p10': 0.0,
+                'train/grad_norm/p25': 0.0,
+                'train/grad_norm/p75': 0.0,
+                'train/grad_norm/p90': 0.0,
+                'train/grad_norm/p95': 0.0,
+                'train/grad_norm/p98': 0.0,
+                'train/grad_norm/p99': 0.0,
+            }
 
         # For --sample_at_first
         if train_util.sample_images_check(args, 0, global_step) or self.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
@@ -2393,7 +2471,11 @@ class NetworkTrainer:
 
                         if accelerator.sync_gradients:
                             self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                            params_to_analyze = accelerator.unwrap_model(network).get_trainable_params()
+                            gradient_stats = analyze_gradient_norms(params_to_analyze)
+
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+
                             if args.max_grad_norm != 0.0:
                                 grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
                                 grad_norm_clipped = min(grad_norm, args.max_grad_norm)
@@ -2469,7 +2551,23 @@ class NetworkTrainer:
                             )
 
                             if self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
-                                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, 
+                                                                                                       skipped_dataloader or train_dataloader, 
+                                                                                                       val_loss_recorder, 
+                                                                                                       val_dataloader, 
+                                                                                                       cyclic_val_dataloader, 
+                                                                                                       network, tokenizers, 
+                                                                                                       tokenize_strategy, 
+                                                                                                       text_encoders, 
+                                                                                                       text_encoding_strategy, 
+                                                                                                       unet, 
+                                                                                                       vae, 
+                                                                                                       noise_scheduler, 
+                                                                                                       vae_dtype, 
+                                                                                                       weight_dtype, 
+                                                                                                       accelerator, 
+                                                                                                       args, 
+                                                                                                       train_text_encoder)
                             else:
                                 current_val_loss, average_val_loss, val_logs = None, None, None
 
@@ -2529,7 +2627,10 @@ class NetworkTrainer:
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, 
+                            optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
+                            grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, 
+                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats
                         )
                         accelerator.log(logs, step=global_step)
                                             
