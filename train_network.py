@@ -338,7 +338,7 @@ class NetworkTrainer:
         snr = torch.clamp(snr, min=min_snr, max=max_snr)
 
         # Define a small epsilon to prevent division by zero
-        epsilon = 1e-8
+        epsilon = 1e-37
         # Compute the Mean Absolute Percentage Error (MAPE)
         mape = torch.abs((target - predicted) / (target + epsilon))
         # Normalize MAPE values between 0 and 1

@@ -6353,8 +6353,8 @@ def get_gamma_if_needed(args, loss_type: str, global_step: int, final_step: int)
         gamma = gamma_max + (gamma_min - gamma_max) * progress
         
     elif decay_schedule == 'exponential':
-        # Exponential decay: gamma = gamma_min + (gamma_max - gamma_min) * exp(-5 * progress)
-        gamma = gamma_min + (gamma_max - gamma_min) * math.exp(-5 * progress)
+        # Exponential decay: gamma = gamma_min + (gamma_max - gamma_min) * exp(-1 * progress)
+        gamma = gamma_min + (gamma_max - gamma_min) * math.exp(-1 * progress)
         
     elif decay_schedule == 'cosine':
         # Cosine annealing: gamma = gamma_min + 0.5 * (gamma_max - gamma_min) * (1 + cos(pi * progress))
