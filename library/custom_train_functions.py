@@ -1,6 +1,7 @@
 import torch
 import argparse
 import random
+import math
 import re
 from typing import List, Optional, Union
 from .utils import setup_logging
@@ -11,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def prepare_scheduler_for_custom_training(noise_scheduler, device):
+def prepare_scheduler_for_custom_training(noise_scheduler, device, mu=None, b=None):
     if hasattr(noise_scheduler, "all_snr"):
         return
 
@@ -23,6 +24,22 @@ def prepare_scheduler_for_custom_training(noise_scheduler, device):
     all_snr = (alpha / sigma) ** 2
 
     noise_scheduler.all_snr = all_snr.to(device)
+
+    # If user specified Laplace-based sampling arguments, compute them
+    if mu is not None and b is not None:
+        # Make sure mu and b are floats:
+        mu = float(mu)
+        b = float(b)
+
+        logger.info(f"Using Laplace-weighted timesteps with mu={mu}, b={b}")
+
+        log_snr = all_snr.log()            # log of snr
+        # laplace_weights formula (paper style)
+        laplace_weights = ((log_snr - mu).abs() / (-b)).exp() / (2 * b)
+        laplace_weights /= laplace_weights.mean()
+
+        noise_scheduler.laplace_weights = laplace_weights.to(device)
+        logger.info("Laplace weights computed and stored in noise_scheduler.laplace_weights")
 
 
 def fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler):

@@ -287,12 +287,18 @@ class NetworkTrainer:
 
     def post_process_network(self, args, accelerator, network, text_encoders, unet):
         pass
-
     def get_noise_scheduler(self, args: argparse.Namespace, device: torch.device) -> Any:
         noise_scheduler = DDPMScheduler(
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
         )
-        prepare_scheduler_for_custom_training(noise_scheduler, device)
+        # Pass mu and b if user provided them
+        prepare_scheduler_for_custom_training(
+            noise_scheduler,
+            device,
+            mu=args.laplace_timestep_sampling_mu,
+            b=args.laplace_timestep_sampling_b
+        )
+
         if args.zero_terminal_snr:
             custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
         return noise_scheduler
@@ -3102,6 +3108,18 @@ def setup_parser() -> argparse.ArgumentParser:
             choices=["linear", "exponential", "cosine"],
             help="Decay schedule for l0 loss gamma decay.",
         )
+    parser.add_argument(
+        "--laplace_timestep_sampling_mu",
+        type=float,
+        default=None,
+        help="Mu parameter for Laplace-based timestep sampling (optional)."
+    )
+    parser.add_argument(
+        "--laplace_timestep_sampling_b",
+        type=float,
+        default=None,
+        help="b parameter for Laplace-based timestep sampling (optional)."
+    )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
