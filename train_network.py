@@ -6,6 +6,7 @@ import sys
 import random
 import time
 import json
+import contextlib
 from multiprocessing import Value
 from typing import Any, List
 import toml
@@ -1698,9 +1699,6 @@ class NetworkTrainer:
         iter_size = args.gradient_accumulation_steps
         accumulation_counter = 0
 
-        # Initialize lists to store necessary data for recomputing the loss
-        batch_data_list = []
-
         if args.grokfast_type:
             if args.grokfast_type.lower() == "ema":
                 grad_filter = Gradfilter_ema(accelerator.unwrap_model(network), 
@@ -1752,134 +1750,7 @@ class NetworkTrainer:
                     grad_accum_loss_scaling = 1.0 / effective_batch_size
 
                     # Prevent gradient synchronization during accumulation steps in distributed settings
-                    if not sync_gradients and accelerator.num_processes > 1:
-                        # Accumulate gradients without synchronizing
-                        with accelerator.no_sync(training_model):
-                            # Perform forward and backward passes
-                            # Processing batch and computing loss
-
-                            # Call any required functions at the start of the step
-                            on_step_start_for_network(text_encoder, unet)
-
-                            # Temporary, for batch processing
-                            self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
-
-                            # Prepare latents
-                            if "latents" in batch and batch["latents"] is not None:
-                                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
-                            else:
-                                with torch.no_grad():
-                                    # Convert images to latents
-                                    latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
-                                    latents = latents.to(dtype=weight_dtype)
-                                    # Replace NaNs if any
-                                    if torch.any(torch.isnan(latents)):
-                                        accelerator.print("NaN found in latents, replacing with zeros")
-                                        latents = torch.nan_to_num(latents, 0, out=latents)
-
-                            latents = self.shift_scale_latents(args, latents)
-
-                            # Handle network multipliers
-                            if network_has_multiplier:
-                                multipliers = batch["network_multipliers"]
-                                if torch.all(multipliers == multipliers[0]):
-                                    multipliers = multipliers[0].item()
-                                else:
-                                    raise NotImplementedError("Multipliers for each sample are not supported yet")
-                                accelerator.unwrap_model(network).set_multiplier(multipliers)
-
-                            # Prepare text encoder conditions
-                            text_encoder_conds = batch.get("text_encoder_outputs_list", [])
-                            if not text_encoder_conds or text_encoder_conds[0] is None or train_text_encoder:
-                                with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
-                                    # Get the text embeddings
-                                    if args.weighted_captions:
-                                        input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
-                                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
-                                            tokenize_strategy,
-                                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
-                                            input_ids_list,
-                                            weights_list,
-                                        )
-                                    else:
-                                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
-                                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
-                                            tokenize_strategy,
-                                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
-                                            input_ids,
-                                        )
-                                    if args.full_fp16:
-                                        encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
-                                # Update text encoder conditions
-                                if not text_encoder_conds:
-                                    text_encoder_conds = encoded_text_encoder_conds
-                                else:
-                                    for i in range(len(encoded_text_encoder_conds)):
-                                        if encoded_text_encoder_conds[i] is not None:
-                                            text_encoder_conds[i] = encoded_text_encoder_conds[i]
-
-                            # Get noise prediction and target
-                            noise_pred, target, timesteps, weighting, noisy_latents = self.get_noise_pred_and_target(
-                                args,
-                                accelerator,
-                                noise_scheduler,
-                                latents,
-                                batch,
-                                text_encoder_conds,
-                                unet,
-                                network,
-                                weight_dtype,
-                                train_unet,
-                            )
-
-                            huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
-                            gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
-                            # Compute loss
-                            loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
-                            if weighting is not None:
-                                loss = loss * weighting
-                            if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                                loss = apply_masked_loss(loss, batch)
-                            loss = loss.mean(dim=[1, 2, 3])  # Mean over dimensions
-
-                            loss_weights = batch["loss_weights"]  # Sample-wise weights
-                            loss = loss * loss_weights
-
-                            if args.loss_multipler or args.loss_multiplier:
-                                loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
-
-                            # For logging
-                            pre_scaling_loss = loss.mean() * grad_accum_loss_scaling
-
-                            if args.edm2_loss_weighting:
-                                loss, loss_scaled = lossweightMLP(loss, timesteps)
-                                loss_scaled = loss_scaled.mean()
-                                loss_scaled = loss_scaled * grad_accum_loss_scaling
-
-                            loss = loss.mean()  # Mean over batch
-
-                            # Divide loss by iter_size to average over accumulated steps
-                            loss = loss * grad_accum_loss_scaling
-
-                            # Backward pass
-                            accelerator.backward(loss)
-
-                            loss = pre_scaling_loss * grad_accum_loss_scaling
-
-                            # Collect necessary data for recomputation during second step
-                            batch_data_list.append({
-                                'batch': batch,
-                                'text_encoder_conds': [cond for cond in text_encoder_conds],
-                                'timesteps': timesteps,
-                                'target': target,
-                                'huber_c': huber_c,
-                                'weighting': weighting if weighting is not None else None,
-                                'noisy_latents': noisy_latents,
-                            })
-
-                        accumulation_counter += 1
-                    else:
-                        # Synchronize gradients and perform optimizer steps
+                    with accelerator.no_sync(training_model) if not sync_gradients and accelerator.num_processes > 1 else contextlib.nullcontext():
                         # Perform forward and backward passes
                         # Processing batch and computing loss
 
@@ -1970,21 +1841,18 @@ class NetworkTrainer:
                         loss_weights = batch["loss_weights"]  # Sample-wise weights
                         loss = loss * loss_weights
 
-                        # Post-process loss
-                        loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
-
                         if args.loss_multipler or args.loss_multiplier:
                             loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
 
                         # For logging
-                        pre_scaling_loss = loss.mean()
+                        pre_scaling_loss = loss.mean() * grad_accum_loss_scaling
 
                         if args.edm2_loss_weighting:
                             loss, loss_scaled = lossweightMLP(loss, timesteps)
                             loss_scaled = loss_scaled.mean()
                             loss_scaled = loss_scaled * grad_accum_loss_scaling
 
-                        loss = loss.mean()  # Average over batch
+                        loss = loss.mean()  # Mean over batch
 
                         # Divide loss by iter_size to average over accumulated steps
                         loss = loss * grad_accum_loss_scaling
@@ -1994,166 +1862,9 @@ class NetworkTrainer:
 
                         loss = pre_scaling_loss * grad_accum_loss_scaling
 
-                        # Collect necessary data for recomputation during second step
-                        batch_data_list.append({
-                            'batch': batch,
-                            'text_encoder_conds': [cond for cond in text_encoder_conds],
-                            'timesteps': timesteps,
-                            'target': target,
-                            'huber_c': huber_c,
-                            'weighting': weighting if weighting is not None else None,
-                            'noisy_latents': noisy_latents,
-                        })
-
                         accumulation_counter += 1
 
                     if sync_gradients:
-                        def closure():
-                            # Initialize total loss
-                            total_loss = 0.0
-
-                            # Second pass over the accumulated batches for the second step
-                            for idx, saved_data in enumerate(batch_data_list):
-                                # Unpack saved data
-                                batch = saved_data['batch']
-                                text_encoder_conds = saved_data['text_encoder_conds']
-                                timesteps = saved_data['timesteps']
-                                target = saved_data['target']
-                                huber_c = saved_data['huber_c']
-                                weighting = saved_data['weighting']
-                                noisy_latents = saved_data['noisy_latents']
-
-                                if args.gradient_checkpointing:
-                                    for x in noisy_latents:
-                                        x.requires_grad_(True)
-                                    for t in text_encoder_conds:
-                                        t.requires_grad_(True)
-
-                                if idx + 1 != len(batch_data_list) and accelerator.num_processes > 1:   
-                                    # Accumulate gradients without synchronizing
-                                    with accelerator.no_sync(training_model):
-                                        # Predict the noise residual
-                                        with accelerator.autocast():
-                                            noise_pred = self.call_unet(
-                                                args,
-                                                accelerator,
-                                                unet,
-                                                noisy_latents.requires_grad_(train_unet),
-                                                timesteps,
-                                                text_encoder_conds,
-                                                batch,
-                                                weight_dtype,
-                                            )
-
-                                        gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
-                                        # Recompute loss
-                                        loss = train_util.conditional_loss(
-                                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c, gamma=gamma
-                                        )
-                                        if weighting is not None:
-                                            loss = loss * weighting
-                                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                                            loss = apply_masked_loss(loss, batch)
-                                        loss = loss.mean([1, 2, 3])
-
-                                        loss_weights = batch["loss_weights"]  # Sample-wise weights
-
-                                        loss = loss * loss_weights
-
-                                        # Post-process loss if needed
-                                        loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
-
-                                        if args.loss_multipler or args.loss_multiplier:
-                                            loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
-
-                                        # For logging
-                                        pre_scaling_loss = loss.mean()
-
-                                        if args.edm2_loss_weighting:
-                                            loss, loss_scaled = lossweightMLP(loss, timesteps)
-                                            loss_scaled = loss_scaled.mean()
-                                            loss_scaled = loss_scaled * grad_accum_loss_scaling
-
-                                        loss = loss.mean()  # Average over batch
-
-                                        # Divide loss by iter_size to average over accumulated steps
-                                        loss = loss * grad_accum_loss_scaling
-
-                                        # Backward pass
-                                        accelerator.backward(loss)
-
-                                        loss = pre_scaling_loss * grad_accum_loss_scaling
-
-                                        # Accumulate total loss
-                                        total_loss += loss.detach()
-                                else:
-                                    # Predict the noise residual
-                                    with accelerator.autocast():
-                                        noise_pred = self.call_unet(
-                                            args,
-                                            accelerator,
-                                            unet,
-                                            noisy_latents.requires_grad_(train_unet),
-                                            timesteps,
-                                            text_encoder_conds,
-                                            batch,
-                                            weight_dtype,
-                                        )
-
-                                    huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
-                                    gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
-                                    # Compute loss
-                                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
-                                    if weighting is not None:
-                                        loss = loss * weighting
-                                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                                        loss = apply_masked_loss(loss, batch)
-                                    loss = loss.mean([1, 2, 3])
-
-                                    loss_weights = batch["loss_weights"]  # Sample-wise weights
-
-                                    loss = loss * loss_weights
-
-                                    # Post-process loss if needed
-                                    loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
-
-                                    if args.loss_multipler or args.loss_multiplier:
-                                        loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
-
-                                    # For logging
-                                    pre_scaling_loss = loss.mean()
-
-                                    if args.edm2_loss_weighting:
-                                        loss, loss_scaled = lossweightMLP(loss, timesteps)
-                                        loss_scaled = loss_scaled.mean()
-                                        loss_scaled = loss_scaled * grad_accum_loss_scaling
-
-                                    loss = loss.mean()  # Average over batch
-
-                                    # Divide loss by iter_size to average over accumulated steps
-                                    loss = loss * grad_accum_loss_scaling
-
-                                    # Divide loss by iter_size to average over accumulated steps
-                                    loss = loss / len(batch_data_list)
-
-                                    # Backward pass
-                                    accelerator.backward(loss)
-
-                                    loss = pre_scaling_loss / len(batch_data_list)
-
-                                    # Accumulate total loss
-                                    total_loss += loss.detach()
-
-                            self.all_reduce_network(accelerator, network)  # sync DDP grad manually
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                            if args.max_grad_norm != 0.0:
-                                accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
-
-                            if args.grokfast_type:
-                                grad_filter.filter()
-
-                            return total_loss
-
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                         if args.max_grad_norm != 0.0:
@@ -2167,7 +1878,7 @@ class NetworkTrainer:
                             grad_filter.filter()
 
                         # Perform step
-                        optimizer.step(closure)
+                        optimizer.step()
 
                         # Zero gradients
                         optimizer.zero_grad(set_to_none=True)
@@ -2180,9 +1891,6 @@ class NetworkTrainer:
 
                         if args.edm2_loss_weighting and mlp_lr_scheduler is not None:
                             mlp_lr_scheduler.step()
-
-                        # Clear the list of saved batches
-                        batch_data_list = []
 
                         # Reset accumulation counter
                         accumulation_counter = 0
