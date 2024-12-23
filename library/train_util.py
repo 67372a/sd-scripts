@@ -6202,8 +6202,10 @@ def immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps):
     sqrt_one_minus_alpha_t = torch.sqrt(1 - alpha_t)
     x_t_b = sqrt_alpha_t * latents + sqrt_one_minus_alpha_t * noise
     return x_t_b
-
 def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps=None, train=True):
+    # always define min_timestep and max_timestep up-front
+    min_timestep = 0 if args.min_timestep is None else args.min_timestep
+    max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
     # Sample noise that we'll add to the latents
     if args.immiscible_noise and train:
         # Generate immiscible noise
@@ -6222,20 +6224,27 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
             noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
         )
 
-    # Sample a random timestep for each image
-    b_size = latents.shape[0]
-    min_timestep = 0 if args.min_timestep is None else args.min_timestep
-    max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
-
-    if fixed_timesteps is not None:
-        timesteps = fixed_timesteps
+    # Sample timesteps based on Laplace weights if available and in training mode
+    if train and hasattr(noise_scheduler, "laplace_weights"):
+        b_size = latents.shape[0]
+        timesteps = torch.multinomial(
+            noise_scheduler.laplace_weights,
+            num_samples=b_size,
+            replacement=True
+        ).to(latents.device)
     else:
-        timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
+        # Fallback to default (random) sampling
+        if fixed_timesteps is not None:
+            timesteps = fixed_timesteps
+        else:
+            b_size = latents.shape[0]
+            min_timestep = 0 if args.min_timestep is None else args.min_timestep
+            max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+            timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=latents.device)
+        timesteps = timesteps.long()
 
     if args.immiscible_noise and args.immiscible_diffusion and train:
         noisy_latents = immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps)
-    # Add noise to the latents according to the noise magnitude at each timestep
-    # (this is the forward diffusion process)
     elif args.ip_noise_gamma and train:
         gamma_max = args.ip_noise_gamma
         gamma_min = float(getattr(args, 'ip_noise_gamma_scaling_min', 0.0))  # Default to 0.0 if not set
