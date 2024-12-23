@@ -55,6 +55,8 @@ setup_logging()
 import logging
 import itertools
 
+import tools.stochastic_accumulator as stochastic_accumulator
+
 logger = logging.getLogger(__name__)
 
 @torch.no_grad()
@@ -1723,7 +1725,12 @@ class NetworkTrainer:
             if args.min_snr_gamma:
                 logger.warning("Min snr gamma and sangoi loss modification both limit the max snr, ignoring min snr gamma in favor of sangoi.")
 
-        if train_util.is_sam_optimizer(args):
+        if args.stochastic_accumulation:
+            if not args.full_bf16:
+                logger.warning(""""Stochastic accumulation is only applied if using full_bf16. 
+                               Stochastic accumulation doesn't support fp16, while in mixed precision gradients are fp32.""")
+
+        if args.stochastic_accumulation and args.full_bf16:
             for epoch in range(epoch_to_start, num_train_epochs):
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
                 current_epoch.value = epoch + 1
@@ -1731,6 +1738,10 @@ class NetworkTrainer:
                 metadata["ss_epoch"] = str(epoch + 1)
 
                 accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
+
+                if args.full_bf16:
+                    # apply stochastic grad accumulator hooks
+                    stochastic_accumulator.StochasticAccumulator.assign_hooks(training_model)
 
                 skipped_dataloader = None
                 if initial_step > 0:
@@ -1865,7 +1876,12 @@ class NetworkTrainer:
                         accumulation_counter += 1
 
                     if sync_gradients:
+                        if args.full_bf16:
+                            # apply grad buffer back
+                            stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(training_model)
+
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+
                         params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                         if args.max_grad_norm != 0.0:
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
@@ -1915,7 +1931,6 @@ class NetworkTrainer:
                             max_mean_logs = {"Keys Scaled": keys_scaled, "Avg key norm": mean_norm}
                         else:
                             keys_scaled, mean_norm, maximum_norm = None, None, None
-
 
                         progress_bar.update(1)
                         global_step += 1
@@ -2827,6 +2842,12 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="b parameter for Laplace-based timestep sampling (optional)."
+    )
+
+    parser.add_argument(
+        "--stochastic_accumulation",
+        action="store_true",
+        help="Stochastic accumulation"
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")

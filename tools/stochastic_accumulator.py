@@ -27,7 +27,7 @@ class StochasticAccumulator:
     @staticmethod
     def stochastic_grad_accum(p):
         # hack by adding attributes to "grad"
-        if hasattr(p, "acc_grad") and p.dtype in {torch.float16, torch.bfloat16}:
+        if hasattr(p, "acc_grad") and p.dtype == torch.bfloat16:
             acc_grad_fp32 = p.acc_grad.clone().to(torch.float32)
             # acc_grad_fp32 += fp_32_grad
             # upcast the gradient and then add it to p.grad
@@ -50,12 +50,15 @@ class StochasticAccumulator:
 
     @staticmethod
     def assign_hooks(model):
+        hooks = []
         for n, p in model.named_parameters():
             if p.requires_grad:
-                p.register_post_accumulate_grad_hook(
+                hook = p.register_post_accumulate_grad_hook(
                     StochasticAccumulator.stochastic_grad_accum
                 )
-                
+                hooks.append(hook)
+        return hooks
+
 # @torch.compile
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
