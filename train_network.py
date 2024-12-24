@@ -76,7 +76,6 @@ def analyze_gradient_norms(parameters):
     for param in parameters:
         if param.grad is not None:
             grad = param.grad
-            # Count zeros, infs, and nans
 
             norm = torch.norm(grad).item()
             if not (np.isnan(norm) or np.isinf(norm)):
@@ -1741,7 +1740,7 @@ class NetworkTrainer:
 
                 if args.full_bf16:
                     # apply stochastic grad accumulator hooks
-                    stochastic_accumulator.StochasticAccumulator.assign_hooks(training_model)
+                    stochastic_accumulator.StochasticAccumulator.assign_hooks(network)
 
                 skipped_dataloader = None
                 if initial_step > 0:
@@ -1852,11 +1851,28 @@ class NetworkTrainer:
                         loss_weights = batch["loss_weights"]  # Sample-wise weights
                         loss = loss * loss_weights
 
+                        if args.sangoi_loss_modifier:
+                            # Min SNR should be zero for zero_terminal_snr
+                            if args.zero_terminal_snr:
+                                min_snr = 0
+                            else:
+                                min_snr = float(args.sangoi_loss_modifier_min_snr)
+
+                            loss = loss * self.sangoi_loss_modifier(timesteps, 
+                                                                    noise_pred.float(), 
+                                                                    target.float(), 
+                                                                    noise_scheduler,
+                                                                    min_snr,
+                                                                    float(args.sangoi_loss_modifier_max_snr))
+
+                        # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
+                        loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
                         if args.loss_multipler or args.loss_multiplier:
                             loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
 
                         # For logging
-                        pre_scaling_loss = loss.mean() * grad_accum_loss_scaling
+                        pre_scaling_loss = loss.mean()
 
                         if args.edm2_loss_weighting:
                             loss, loss_scaled = lossweightMLP(loss, timesteps)
@@ -1871,14 +1887,18 @@ class NetworkTrainer:
                         # Backward pass
                         accelerator.backward(loss)
 
+                        # Replace loss with pre_scaling_loss, scaled by grad_accum_loss_scaling
                         loss = pre_scaling_loss * grad_accum_loss_scaling
 
                         accumulation_counter += 1
 
                     if sync_gradients:
+                        #logger.info("Sync gradients. accumulation_counter=%s, global_step=%s, epoch=%s, epoch_step=%s", 
+                        #            accumulation_counter, global_step + 1, epoch, step)
+
                         if args.full_bf16:
                             # apply grad buffer back
-                            stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(training_model)
+                            stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(network)
 
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
 
@@ -1903,6 +1923,16 @@ class NetworkTrainer:
                         optimizer.zero_grad(set_to_none=True)
 
                         if args.edm2_loss_weighting:
+                            self.all_reduce_network(accelerator, lossweightMLP)  # sync DDP grad manually
+                            params_to_clip = accelerator.unwrap_model(lossweightMLP).get_trainable_params()
+                            edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                            if edm2_loss_weighting_max_grad_norm != 0.0:
+                                edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+                                edm2_grad_norm_clipped = min(edm2_grad_norm, edm2_loss_weighting_max_grad_norm)
+                            else: 
+                                edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
+                                edm2_grad_norm_clipped = edm2_grad_norm
+
                             MLP_optim.zero_grad(set_to_none=True)
 
                         # Update learning rate
@@ -2001,14 +2031,15 @@ class NetworkTrainer:
                     if val_logs:
                         logs = {**val_logs, **logs}
 
-                    if args.max_grad_norm != 0.0 :
+                    if args.max_grad_norm != 0.0:
                         logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, 
-                            keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, 
-                            average_val_loss, current_loss_scaled, average_loss_scaled, mlp_lr_scheduler, gradient_stats
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, 
+                            optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
+                            grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, 
+                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats
                         )
                         accelerator.log(logs, step=global_step)
                                             

@@ -79,7 +79,7 @@ def prepare_deepspeed_plugin(args: argparse.Namespace):
         )
         exit(1)
 
-    if is_sam_optimizer(args):
+    if args.full_bf16 and getattr(args, "stochastic_accumulation", False):
         # Don't set gradient_accumulation_steps, as handled manually in training loop for SAM
         deepspeed_plugin = DeepSpeedPlugin(
             zero_stage=args.zero_stage,
@@ -105,7 +105,7 @@ def prepare_deepspeed_plugin(args: argparse.Namespace):
         )
 
     deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = args.train_batch_size
-    if is_sam_optimizer(args):
+    if args.full_bf16 and getattr(args, "stochastic_accumulation", False):
         deepspeed_plugin.deepspeed_config["train_batch_size"] = (
             args.train_batch_size * int(os.environ["WORLD_SIZE"])
         )
@@ -158,5 +158,3 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
     ds_model = DeepSpeedWrapper(**models)
     return ds_model
 
-def is_sam_optimizer(args: argparse.Namespace) -> bool:
-    return args.optimizer_type.lower().split(".")[-1] in {"sam","gsam","wsam","bsam"}

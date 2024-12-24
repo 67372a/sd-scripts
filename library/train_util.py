@@ -5165,13 +5165,6 @@ def is_schedulefree_optimizer(optimizer: Optimizer, args: argparse.Namespace) ->
 def is_schedulefree_wrapper_optimizer(args: argparse.Namespace) -> bool:
     return args.optimizer_type.lower().endswith("schedulefreewrapper")
 
-def is_sam_optimizer(args: argparse.Namespace) -> bool:
-    return args.optimizer_type.lower().split(".")[-1] in {"sam","gsam","wsam","bsam"}
-
-def is_bsam_optimizer(args: argparse.Namespace) -> bool:
-    return args.optimizer_type.lower().split(".")[-1] in {"bsam"}
-
-
 def get_dummy_scheduler(optimizer: Optimizer) -> Any:
     # dummy scheduler for schedulefree optimizer. supports only empty step(), get_last_lr() and optimizers.
     # this scheduler is used for logging only.
@@ -5222,7 +5215,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         return get_dummy_scheduler(optimizer)
     
     # Need to apply scheduler to base_optimizer
-    if (is_sam_optimizer(args) and not is_bsam_optimizer(args)) or is_schedulefree_wrapper_optimizer(args):
+    if is_schedulefree_wrapper_optimizer(args):
         optimizer = optimizer.base_optimizer
 
     name = args.lr_scheduler
@@ -5468,7 +5461,7 @@ def prepare_accelerator(args: argparse.Namespace):
     kwargs_handlers = [i for i in kwargs_handlers if i is not None]
     deepspeed_plugin = deepspeed_utils.prepare_deepspeed_plugin(args)
 
-    if is_sam_optimizer(args):
+    if args.full_bf16 and getattr(args, "stochastic_accumulation", False):
         # Don't set gradient_accumulation_steps, as handled manually in training loop for SAM
         accelerator = Accelerator(
             mixed_precision=args.mixed_precision,

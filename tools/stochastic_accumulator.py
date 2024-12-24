@@ -27,24 +27,26 @@ class StochasticAccumulator:
     @staticmethod
     def stochastic_grad_accum(p):
         # hack by adding attributes to "grad"
-        if hasattr(p, "acc_grad") and p.dtype == torch.bfloat16:
-            acc_grad_fp32 = p.acc_grad.clone().to(torch.float32)
+        if hasattr(p, "acc_grad") and p.dtype == torch.bfloat16 and p.grad is not None:
+            acc_grad_fp32 = p.acc_grad.to(torch.float32, copy=True)
             # acc_grad_fp32 += fp_32_grad
             # upcast the gradient and then add it to p.grad
             acc_grad_fp32.add_(p.grad.to(torch.float32))
             copy_stochastic_(p.acc_grad, acc_grad_fp32)
             del acc_grad_fp32
-        elif hasattr(p, "acc_grad"):
+            del p.grad
+        elif hasattr(p, "acc_grad") and p.grad is not None:
             p.acc_grad.add_(p.grad)
-        else:
+            del p.grad
+        elif p.grad is not None:
             p.acc_grad = p.grad.clone()
+            del p.grad
             
-        del p.grad
 
     @staticmethod
     def reassign_grad_buffer(model):
         for n, p in model.named_parameters():
-            if p.requires_grad:
+            if hasattr(p, "acc_grad"):
                 p.grad = p.acc_grad
                 del p.acc_grad
 
@@ -52,7 +54,7 @@ class StochasticAccumulator:
     def assign_hooks(model):
         hooks = []
         for n, p in model.named_parameters():
-            if p.requires_grad:
+            if p.requires_grad or p.grad is not None:
                 hook = p.register_post_accumulate_grad_hook(
                     StochasticAccumulator.stochastic_grad_accum
                 )
