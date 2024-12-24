@@ -1882,6 +1882,9 @@ class NetworkTrainer:
 
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
 
+                        params_to_analyze = accelerator.unwrap_model(network).get_trainable_params()
+                        gradient_stats = analyze_gradient_norms(params_to_analyze)
+
                         params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                         if args.max_grad_norm != 0.0:
                             grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm).item()
@@ -2003,7 +2006,9 @@ class NetworkTrainer:
 
                     if len(accelerator.trackers) > 0:
                         logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, average_loss_scaled, mlp_lr_scheduler
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, 
+                            keys_scaled, mean_norm, maximum_norm, grad_norm, grad_norm_clipped, current_val_loss, 
+                            average_val_loss, current_loss_scaled, average_loss_scaled, mlp_lr_scheduler, gradient_stats
                         )
                         accelerator.log(logs, step=global_step)
                                             
