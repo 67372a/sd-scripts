@@ -1932,6 +1932,12 @@ class NetworkTrainer:
                                 edm2_grad_norm = accelerator.clip_grad_norm_(params_to_clip, float('inf')).item()
                                 edm2_grad_norm_clipped = edm2_grad_norm
 
+                            MLP_optim.step()
+
+                        # Zero gradients
+                        optimizer.zero_grad(set_to_none=True)
+
+                        if args.edm2_loss_weighting:
                             MLP_optim.zero_grad(set_to_none=True)
 
                         # Update learning rate
