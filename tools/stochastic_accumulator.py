@@ -27,20 +27,21 @@ class StochasticAccumulator:
     @staticmethod
     def stochastic_grad_accum(p):
         # hack by adding attributes to "grad"
-        if hasattr(p, "acc_grad") and p.dtype == torch.bfloat16 and p.grad is not None:
-            acc_grad_fp32 = p.acc_grad.to(torch.float32, copy=True)
-            # acc_grad_fp32 += fp_32_grad
-            # upcast the gradient and then add it to p.grad
-            acc_grad_fp32.add_(p.grad.to(torch.float32))
-            copy_stochastic_(p.acc_grad, acc_grad_fp32)
-            del acc_grad_fp32
-            del p.grad
-        elif hasattr(p, "acc_grad") and p.grad is not None:
-            p.acc_grad.add_(p.grad)
-            del p.grad
-        elif p.grad is not None:
-            p.acc_grad = p.grad.clone()
-            del p.grad
+        if p.grad is not None:
+            if hasattr(p, "acc_grad") and p.dtype == torch.bfloat16:
+                acc_grad_fp32 = p.acc_grad.to(torch.float32, copy=True)
+                # acc_grad_fp32 += fp_32_grad
+                # upcast the gradient and then add it to p.grad
+                acc_grad_fp32.add_(p.grad.to(torch.float32))
+                copy_stochastic_(p.acc_grad, acc_grad_fp32)
+                del acc_grad_fp32
+                del p.grad
+            elif hasattr(p, "acc_grad"):
+                p.acc_grad.add_(p.grad)
+                del p.grad
+            else:
+                p.acc_grad = p.grad.clone()
+                del p.grad
             
 
     @staticmethod
