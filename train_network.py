@@ -1726,8 +1726,7 @@ class NetworkTrainer:
 
         if args.stochastic_accumulation:
             if not args.full_bf16:
-                logger.warning(""""Stochastic accumulation is only applied if using full_bf16. 
-                               Stochastic accumulation doesn't support fp16, while in mixed precision gradients are fp32.""")
+                logger.warning("""Stochastic accumulation is only applied if using full_bf16. Stochastic accumulation doesn't support fp16, while in mixed precision gradients are fp32.""")
 
         if args.stochastic_accumulation and args.full_bf16:
             for epoch in range(epoch_to_start, num_train_epochs):

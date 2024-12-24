@@ -45,7 +45,7 @@ class StochasticAccumulator:
 
     @staticmethod
     def reassign_grad_buffer(model):
-        for n, p in model.named_parameters():
+        for p in model.parameters():
             if hasattr(p, "acc_grad"):
                 p.grad = p.acc_grad
                 del p.acc_grad
@@ -53,12 +53,12 @@ class StochasticAccumulator:
     @staticmethod
     def assign_hooks(model):
         hooks = []
-        for n, p in model.named_parameters():
-            if p.requires_grad or p.grad is not None:
-                hook = p.register_post_accumulate_grad_hook(
-                    StochasticAccumulator.stochastic_grad_accum
-                )
-                hooks.append(hook)
+        for p in model.parameters():
+            #if p.requires_grad or p.grad is not None:
+            hook = p.register_post_accumulate_grad_hook(
+                StochasticAccumulator.stochastic_grad_accum
+            )
+            hooks.append(hook)
         return hooks
 
 # @torch.compile
