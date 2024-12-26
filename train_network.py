@@ -317,7 +317,8 @@ class NetworkTrainer:
                                target: torch.Tensor, 
                                noise_scheduler,
                                min_snr: float = 1e-4,
-                               max_snr: float = 100) -> torch.Tensor:
+                               max_snr: float = 100,
+                               eps: float = 1e-12) -> torch.Tensor:
         """
         Source: https://github.com/sangoi-exe/sangoi-loss-function
         
@@ -328,27 +329,22 @@ class NetworkTrainer:
             timesteps (Tensor): The current training step's timesteps.
             predicted (Tensor): Predicted values from the neural network.
             target (Tensor): Ground truth target values.
-            noise_scheduler:
-            min_snr (float):
-            max_snr (float):
+            noise_scheduler: The noise scheduler being used by the training process.
+            min_snr (float): The minimum value for snr, clamping all values less than to this value.
+            max_snr (float): The maximum value for snr, clamping all values greater than to this value.
+            eps (float): To prevent division by zero and provide numeric stablity
 
         Returns:
             Tensor: A tensor of weights per example to modify the loss.
         """
-
-        # Define minimum and maximum SNR values to clamp extreme values
-        #min_snr = 1e-4
-        #max_snr = 100
 
         # Obtain the SNR for each timestep
         snr = noise_scheduler.all_snr[timesteps.long()]
         # Clamp the SNR values to the defined range to avoid extreme values
         snr = torch.clamp(snr, min=min_snr, max=max_snr)
 
-        # Define a small epsilon to prevent division by zero
-        epsilon = 1e-16
         # Compute the Mean Absolute Percentage Error (MAPE)
-        mape = torch.abs((target - predicted) / (target + epsilon))
+        mape = torch.abs((target - predicted) / (target + eps))
         # Normalize MAPE values between 0 and 1
         mape = torch.clamp(mape, min=0, max=1)
         # Calculate the average MAPE per example across spatial dimensions
