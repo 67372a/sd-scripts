@@ -311,55 +311,6 @@ class NetworkTrainer:
     def shift_scale_latents(self, args, latents):
         return latents * self.vae_scale_factor
     
-    def sangoi_loss_modifier(self, 
-                               timesteps: torch.Tensor, 
-                               predicted: torch.Tensor, 
-                               target: torch.Tensor, 
-                               noise_scheduler,
-                               min_snr: float = 1e-4,
-                               max_snr: float = 100,
-                               eps: float = 1e-12) -> torch.Tensor:
-        """
-        Source: https://github.com/sangoi-exe/sangoi-loss-function
-        
-        Computes a loss modifier based on the Mean Absolute Percentage Error (MAPE) and the Signal-to-Noise Ratio (SNR).
-        This modifier adjusts the loss according to the prediction accuracy and the difficulty of the prediction task.
-
-        Args:
-            timesteps (Tensor): The current training step's timesteps.
-            predicted (Tensor): Predicted values from the neural network.
-            target (Tensor): Ground truth target values.
-            noise_scheduler: The noise scheduler being used by the training process.
-            min_snr (float): The minimum value for snr, clamping all values less than to this value.
-            max_snr (float): The maximum value for snr, clamping all values greater than to this value.
-            eps (float): To prevent division by zero and provide numeric stablity
-
-        Returns:
-            Tensor: A tensor of weights per example to modify the loss.
-        """
-
-        # Obtain the SNR for each timestep
-        snr = noise_scheduler.all_snr[timesteps.long()]
-        # Clamp the SNR values to the defined range to avoid extreme values
-        snr = torch.clamp(snr, min=min_snr, max=max_snr)
-
-        # Compute the Mean Absolute Percentage Error (MAPE)
-        mape = torch.abs((target - predicted) / (target + eps))
-        # Normalize MAPE values between 0 and 1
-        mape = torch.clamp(mape, min=0, max=1)
-        # Calculate the average MAPE per example across spatial dimensions
-        mape = mape.mean(dim=[1, 2, 3])
-
-        # Compute the SNR weight using the natural logarithm (adding 1 to avoid log(0))
-        snr_weight = torch.log(snr + 1)
-        # Invert MAPE to represent accuracy instead of error
-        mape_reward = 1 - mape
-        # Calculate the combined weight using the negative exponential of the product of MAPE reward and SNR weight
-        combined_weight = torch.exp(-mape_reward * snr_weight)
-
-        # Return the tensor of weights per example to modify the loss
-        return combined_weight
-
     def get_noise_pred_and_target(
         self,
         args,
@@ -430,7 +381,16 @@ class NetworkTrainer:
                 target[diff_output_pr_indices] = noise_pred_prior.to(target.dtype)
 
         return noise_pred, target, timesteps, None, noisy_latents
-
+    
+    def determine_grad_sync_context(self, accelerator, sync_gradients, training_model, lossweightMLP = None):
+        if not sync_gradients and accelerator.num_processes > 1:
+            if lossweightMLP is not None:
+                return accelerator.no_sync(training_model, lossweightMLP)
+            else:
+                return accelerator.no_sync(training_model)
+        else:
+            return contextlib.nullcontext()
+        
     def post_process_loss(self, loss, args, timesteps, noise_scheduler, train=True):
         if args.min_snr_gamma and train and not args.sangoi_loss_modifier:
             loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
@@ -1577,6 +1537,7 @@ class NetworkTrainer:
                 self.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
         else:
             mlp_lr_scheduler = None
+            lossweightMLP = None
 
         if accelerator.is_main_process:
             init_kwargs = {}
@@ -1733,7 +1694,7 @@ class NetworkTrainer:
 
                 accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
 
-                if args.full_bf16:
+                if args.stochastic_accumulation and args.full_bf16:
                     # apply stochastic grad accumulator hooks
                     stochastic_accumulator.StochasticAccumulator.assign_hooks(network)
 
@@ -1755,7 +1716,7 @@ class NetworkTrainer:
                     grad_accum_loss_scaling = 1.0 / effective_batch_size
 
                     # Prevent gradient synchronization during accumulation steps in distributed settings
-                    with accelerator.no_sync(training_model) if not sync_gradients and accelerator.num_processes > 1 else contextlib.nullcontext():
+                    with self.determine_grad_sync_context(accelerator, sync_gradients, training_model, lossweightMLP):
                         # Perform forward and backward passes
                         # Processing batch and computing loss
 
@@ -1853,7 +1814,7 @@ class NetworkTrainer:
                             else:
                                 min_snr = float(args.sangoi_loss_modifier_min_snr)
 
-                            loss = loss * self.sangoi_loss_modifier(timesteps, 
+                            loss = loss * train_util.sangoi_loss_modifier(timesteps, 
                                                                     noise_pred.float(), 
                                                                     target.float(), 
                                                                     noise_scheduler,
@@ -1891,7 +1852,7 @@ class NetworkTrainer:
                         #logger.info("Sync gradients. accumulation_counter=%s, global_step=%s, epoch=%s, epoch_step=%s", 
                         #            accumulation_counter, global_step + 1, epoch, step)
 
-                        if args.full_bf16:
+                        if args.stochastic_accumulation and args.full_bf16:
                             # apply grad buffer back
                             stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(network)
 
@@ -2209,7 +2170,7 @@ class NetworkTrainer:
                             else:
                                 min_snr = float(args.sangoi_loss_modifier_min_snr)
 
-                            loss = loss * self.sangoi_loss_modifier(timesteps, 
+                            loss = loss * train_util.sangoi_loss_modifier(timesteps, 
                                                                     noise_pred.float(), 
                                                                     target.float(), 
                                                                     noise_scheduler,

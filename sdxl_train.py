@@ -12,6 +12,7 @@ import random
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
 import matplotlib
+import contextlib
 matplotlib.use('Agg')  # Set the backend to 'Agg', non-interactive backend
 import matplotlib.pyplot as plt
 plt.ioff() # Explicitly turn off interactive mode
@@ -35,6 +36,8 @@ from library.utils import setup_logging, add_logging_arguments
 setup_logging()
 import logging
 import itertools
+
+import tools.stochastic_accumulator as stochastic_accumulator
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +107,15 @@ def append_block_lr_to_logs(block_lrs, logs, lr_scheduler, optimizer_type):
         block_index += 1
 
     train_util.append_lr_to_logs_with_names(logs, lr_scheduler, optimizer_type, names)
+
+def determine_grad_sync_context(accelerator, sync_gradients, training_models, lossweightMLP = None):
+    if not sync_gradients and accelerator.num_processes > 1:
+        if lossweightMLP is not None:
+            return accelerator.no_sync(*training_models, lossweightMLP)
+        else:
+            return accelerator.no_sync(*training_models)
+    else:
+        return contextlib.nullcontext()
 
 def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args):
     total_loss = 0.0
@@ -830,7 +842,10 @@ def train(args):
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
     )
-    prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
+    prepare_scheduler_for_custom_training(noise_scheduler, 
+                                          accelerator.device, 
+                                          mu=args.laplace_timestep_sampling_mu,
+                                          b=args.laplace_timestep_sampling_b)
     if args.zero_terminal_snr:
         custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
@@ -881,6 +896,7 @@ def train(args):
             plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
     else:
         mlp_lr_scheduler = None
+        lossweightMLP = None
 
     if accelerator.is_main_process:
         init_kwargs = {}
@@ -912,261 +928,604 @@ def train(args):
     if args.edm2_loss_weighting:
         loss_scaled_recorder = train_util.LossRecorder()
 
+        if args.sangoi_loss_modifier:
+            if args.zero_terminal_snr:
+                logger.warning("As zero terminal SNR is set, setting min snr for sangoi loss modifier to zero.")
+            if args.min_snr_gamma:
+                logger.warning("Min snr gamma and sangoi loss modification both limit the max snr, ignoring min snr gamma in favor of sangoi.")
+
+        if args.stochastic_accumulation:
+            if not args.full_bf16:
+                logger.warning("""Stochastic accumulation is only applied if using full_bf16. Stochastic accumulation doesn't support fp16, while in mixed precision gradients are fp32.""")
+
+    # Define the number of steps to accumulate gradients
+    iter_size = args.gradient_accumulation_steps
+    accumulation_counter = 0
+
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
         current_epoch.value = epoch + 1
 
         for m in training_models:
             m.train()
+            if args.stochastic_accumulation and args.full_bf16:
+                # apply stochastic grad accumulator hooks
+                stochastic_accumulator.StochasticAccumulator.assign_hooks(m)
 
-        for step, batch in enumerate(train_dataloader):
-            current_step.value = global_step
+        if args.stochastic_accumulation and args.full_bf16:
+            for step, batch in enumerate(train_dataloader):
+                current_step.value = global_step
 
-            if args.fused_optimizer_groups:
-                optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
+                if args.fused_optimizer_groups:
+                    optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
 
-            with accelerator.accumulate(*training_models, lossweightMLP) if args.edm2_loss_weighting else accelerator.accumulate(*training_models):
-                if "latents" in batch and batch["latents"] is not None:
-                    latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
-                else:
-                    with torch.no_grad():
-                        # latentに変換
-                        latents = vae.encode(batch["images"].to(vae_dtype)).latent_dist.sample().to(weight_dtype)
+                # Determine whether we should synchronize gradients
+                sync_gradients = (accumulation_counter + 1) % iter_size == 0 or (step + 1 == len(train_dataloader))
 
-                        # NaNが含まれていれば警告を表示し0に置き換える
-                        if torch.any(torch.isnan(latents)):
-                            accelerator.print("NaN found in latents, replacing with zeros")
-                            latents = torch.nan_to_num(latents, 0, out=latents)
-                latents = latents * sdxl_model_util.VAE_SCALE_FACTOR
+                effective_batch_size = accumulation_counter + 1 if sync_gradients else iter_size
+                grad_accum_loss_scaling = 1.0 / effective_batch_size
 
-                text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
-                if text_encoder_outputs_list is not None:
-                    # Text Encoder outputs are cached
-                    encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoder_outputs_list
-                    encoder_hidden_states1 = encoder_hidden_states1.to(accelerator.device, dtype=weight_dtype)
-                    encoder_hidden_states2 = encoder_hidden_states2.to(accelerator.device, dtype=weight_dtype)
-                    pool2 = pool2.to(accelerator.device, dtype=weight_dtype)
-                else:
-                    input_ids1, input_ids2 = batch["input_ids_list"]
-                    with torch.set_grad_enabled(args.train_text_encoder):
-                        # Get the text embedding for conditioning
-                        if args.weighted_captions:
-                            input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
-                            encoder_hidden_states1, encoder_hidden_states2, pool2 = (
-                                text_encoding_strategy.encode_tokens_with_weights(
+                with determine_grad_sync_context(accelerator, sync_gradients, training_models, lossweightMLP):
+                    if "latents" in batch and batch["latents"] is not None:
+                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                    else:
+                        with torch.no_grad():
+                            # latentに変換
+                            latents = vae.encode(batch["images"].to(vae_dtype)).latent_dist.sample().to(weight_dtype)
+
+                            # NaNが含まれていれば警告を表示し0に置き換える
+                            if torch.any(torch.isnan(latents)):
+                                accelerator.print("NaN found in latents, replacing with zeros")
+                                latents = torch.nan_to_num(latents, 0, out=latents)
+                    latents = latents * sdxl_model_util.VAE_SCALE_FACTOR
+
+                    text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+                    if text_encoder_outputs_list is not None:
+                        # Text Encoder outputs are cached
+                        encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoder_outputs_list
+                        encoder_hidden_states1 = encoder_hidden_states1.to(accelerator.device, dtype=weight_dtype)
+                        encoder_hidden_states2 = encoder_hidden_states2.to(accelerator.device, dtype=weight_dtype)
+                        pool2 = pool2.to(accelerator.device, dtype=weight_dtype)
+                    else:
+                        input_ids1, input_ids2 = batch["input_ids_list"]
+                        with torch.set_grad_enabled(args.train_text_encoder):
+                            # Get the text embedding for conditioning
+                            if args.weighted_captions:
+                                input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                                encoder_hidden_states1, encoder_hidden_states2, pool2 = (
+                                    text_encoding_strategy.encode_tokens_with_weights(
+                                        tokenize_strategy,
+                                        [text_encoder1, text_encoder2, accelerator.unwrap_model(text_encoder2)],
+                                        input_ids_list,
+                                        weights_list,
+                                    )
+                                )
+                            else:
+                                input_ids1 = input_ids1.to(accelerator.device)
+                                input_ids2 = input_ids2.to(accelerator.device)
+                                encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoding_strategy.encode_tokens(
                                     tokenize_strategy,
                                     [text_encoder1, text_encoder2, accelerator.unwrap_model(text_encoder2)],
-                                    input_ids_list,
-                                    weights_list,
+                                    [input_ids1, input_ids2],
                                 )
-                            )
-                        else:
-                            input_ids1 = input_ids1.to(accelerator.device)
-                            input_ids2 = input_ids2.to(accelerator.device)
-                            encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoding_strategy.encode_tokens(
-                                tokenize_strategy,
-                                [text_encoder1, text_encoder2, accelerator.unwrap_model(text_encoder2)],
-                                [input_ids1, input_ids2],
-                            )
-                        if args.full_fp16:
-                            encoder_hidden_states1 = encoder_hidden_states1.to(weight_dtype)
-                            encoder_hidden_states2 = encoder_hidden_states2.to(weight_dtype)
-                            pool2 = pool2.to(weight_dtype)
+                            if args.full_fp16:
+                                encoder_hidden_states1 = encoder_hidden_states1.to(weight_dtype)
+                                encoder_hidden_states2 = encoder_hidden_states2.to(weight_dtype)
+                                pool2 = pool2.to(weight_dtype)
 
-                # get size embeddings
-                orig_size = batch["original_sizes_hw"]
-                crop_size = batch["crop_top_lefts"]
-                target_size = batch["target_sizes_hw"]
-                embs = sdxl_train_util.get_size_embeddings(orig_size, crop_size, target_size, accelerator.device).to(weight_dtype)
+                    # get size embeddings
+                    orig_size = batch["original_sizes_hw"]
+                    crop_size = batch["crop_top_lefts"]
+                    target_size = batch["target_sizes_hw"]
+                    embs = sdxl_train_util.get_size_embeddings(orig_size, crop_size, target_size, accelerator.device).to(weight_dtype)
 
-                # concat embeddings
-                vector_embedding = torch.cat([pool2, embs], dim=1).to(weight_dtype)
-                text_embedding = torch.cat([encoder_hidden_states1, encoder_hidden_states2], dim=2).to(weight_dtype)
+                    # concat embeddings
+                    vector_embedding = torch.cat([pool2, embs], dim=1).to(weight_dtype)
+                    text_embedding = torch.cat([encoder_hidden_states1, encoder_hidden_states2], dim=2).to(weight_dtype)
 
-                # Sample noise, sample a random timestep for each image, and add noise to the latents,
-                # with noise offset and/or multires noise if specified
-                noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+                    # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                    # with noise offset and/or multires noise if specified
+                    noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
 
-                noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype
+                    noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype
 
-                # Predict the noise residual
-                with accelerator.autocast():
-                    noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
+                    # Predict the noise residual
+                    with accelerator.autocast():
+                        noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
 
-                if args.v_parameterization:
-                    # v-parameterization training
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    target = noise
+                    if args.v_parameterization:
+                        # v-parameterization training
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
 
-                huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
-                if (
-                    args.min_snr_gamma
-                    or args.scale_v_pred_loss_like_noise_pred
-                    or args.v_pred_like_loss
-                    or args.debiased_estimation_loss
-                    or args.masked_loss
-                    or args.loss_multipler 
-                    or args.loss_multiplier
-                    or args.edm2_loss_weighting
-                ):
-                    # do not mean over batch dimension for snr weight or scale v-pred loss
-                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
-                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                        loss = apply_masked_loss(loss, batch)
-                    loss = loss.mean([1, 2, 3])
+                    huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                    if (
+                        args.min_snr_gamma
+                        or args.scale_v_pred_loss_like_noise_pred
+                        or args.v_pred_like_loss
+                        or args.debiased_estimation_loss
+                        or args.masked_loss
+                        or args.loss_multipler 
+                        or args.loss_multiplier
+                        or args.edm2_loss_weighting
+                        or args.sangoi_loss_modifier
+                    ):
+                        # do not mean over batch dimension for snr weight or scale v-pred loss
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean([1, 2, 3])
 
-                    if args.min_snr_gamma:
-                        loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
-                    if args.scale_v_pred_loss_like_noise_pred:
-                        loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-                    if args.v_pred_like_loss:
-                        loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
-                    if args.debiased_estimation_loss:
-                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+                        if args.sangoi_loss_modifier:
+                            # Min SNR should be zero for zero_terminal_snr
+                            if args.zero_terminal_snr:
+                                min_snr = 0
+                            else:
+                                min_snr = float(args.sangoi_loss_modifier_min_snr)
 
-                    if args.loss_multipler or args.loss_multiplier:
-                        loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
+                            loss = loss * train_util.sangoi_loss_modifier(timesteps, 
+                                                                    noise_pred.float(), 
+                                                                    target.float(), 
+                                                                    noise_scheduler,
+                                                                    min_snr,
+                                                                    float(args.sangoi_loss_modifier_max_snr))
 
-                    # For logging
-                    pre_scaling_loss = loss.mean()
+                        if args.min_snr_gamma and not args.sangoi_loss_modifier:
+                            loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                        if args.scale_v_pred_loss_like_noise_pred:
+                            loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                        if args.v_pred_like_loss:
+                            loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
+                        if args.debiased_estimation_loss:
+                            loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
-                    if args.edm2_loss_weighting:
-                        loss, loss_scaled = lossweightMLP(loss, timesteps)
-                        loss_scaled = loss_scaled.mean()
+                        if args.loss_multipler or args.loss_multiplier:
+                            loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
 
-                    loss = loss.mean()  # Mean over batch
-                else:
-                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "mean", huber_c)
-                    pre_scaling_loss = loss
+                        # For logging
+                        pre_scaling_loss = loss.mean()
 
-
-                accelerator.backward(loss)
-
-                loss = pre_scaling_loss
-
-                if not (args.fused_backward_pass or args.fused_optimizer_groups):
-                    if accelerator.sync_gradients and args.max_grad_norm != 0.0:
-                        params_to_clip = []
-                        for m in training_models:
-                            params_to_clip.extend(m.parameters())
-                        accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                    optimizer.step()
-
-                    if args.edm2_loss_weighting:
-                        edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
-                        if accelerator.sync_gradients and edm2_loss_weighting_max_grad_norm != 0.0:
-                            params_to_clip = []
-                            params_to_clip.extend(lossweightMLP.parameters())
-                            accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
-
-                        MLP_optim.step()
-
-                    lr_scheduler.step()
-
-                    if args.edm2_loss_weighting and mlp_lr_scheduler is not None:
-                        mlp_lr_scheduler.step()
-
-                    optimizer.zero_grad(set_to_none=True)
-
-                    if args.edm2_loss_weighting:
-                        MLP_optim.zero_grad(set_to_none=True)
-                else:
-                    # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
-                    lr_scheduler.step()
-                    if args.fused_optimizer_groups:
-                        for i in range(1, len(optimizers)):
-                            lr_schedulers[i].step()
-
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-
-                if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
-                    plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
-
-                sdxl_train_util.sample_images(
-                    accelerator,
-                    args,
-                    None,
-                    global_step,
-                    accelerator.device,
-                    vae,
-                    tokenizers,
-                    [text_encoder1, text_encoder2],
-                    unet,
-                )
-
-                if cyclic_val_dataloader is not None:
-                    current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
-
-                # 指定ステップごとにモデルを保存
-                if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                        sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
-                            args,
-                            False,
-                            accelerator,
-                            src_path,
-                            save_stable_diffusion_format,
-                            use_safetensors,
-                            save_dtype,
-                            epoch,
-                            num_train_epochs,
-                            global_step,
-                            accelerator.unwrap_model(text_encoder1),
-                            accelerator.unwrap_model(text_encoder2),
-                            accelerator.unwrap_model(unet),
-                            vae,
-                            logit_scale,
-                            ckpt_info,
-                        )
                         if args.edm2_loss_weighting:
-                            train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
-                                                                                    False, 
-                                                                                    accelerator.unwrap_model(lossweightMLP),
-                                                                                    use_safetensors,
-                                                                                    epoch,
-                                                                                    num_train_epochs,
-                                                                                    global_step)
+                            loss, loss_scaled = lossweightMLP(loss, timesteps)
+                            loss_scaled = loss_scaled.mean()
+                            loss_scaled = loss_scaled * grad_accum_loss_scaling
 
-            current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
-            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-            if args.edm2_loss_weighting:
-                current_loss_scaled = loss_scaled.detach().item()
-                loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
-                average_loss_scaled: float = loss_scaled_recorder.moving_average
-            else:
-                current_loss_scaled = None
-                average_loss_scaled = None
-            avr_loss: float = loss_recorder.moving_average
-            logs = {"loss": current_loss, "avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                        loss = loss.mean()  # Mean over batch
+                    else:
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "mean", huber_c)
+                        pre_scaling_loss = loss
 
-            progress_bar.set_postfix(**logs)
+                    # Divide loss by iter_size to average over accumulated steps
+                    loss = loss * grad_accum_loss_scaling
 
-            if val_logs:
-                logs = {**val_logs, **logs}
+                    accelerator.backward(loss)
 
-            if args.edm2_loss_weighting:
-                logs = {"loss/current_loss_scaled": current_val_loss, "loss/average_scaled": average_loss_scaled, **logs}
+                    loss = pre_scaling_loss * grad_accum_loss_scaling
 
-            if len(accelerator.trackers) > 0:
-                if block_lrs is None:
-                    train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
+                    accumulation_counter += 1
+
+                    if sync_gradients:
+                        if not (args.fused_backward_pass or args.fused_optimizer_groups):
+                            if args.stochastic_accumulation and args.full_bf16:
+                                for m in training_models:
+                                    # apply grad buffer back
+                                    stochastic_accumulator.StochasticAccumulator.reassign_grad_buffer(m)
+
+                            if args.max_grad_norm != 0.0:
+                                params_to_clip = []
+                                for m in training_models:
+                                    params_to_clip.extend(m.parameters())
+                                accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                            optimizer.step()
+
+                            if args.edm2_loss_weighting:
+                                edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                                if edm2_loss_weighting_max_grad_norm != 0.0:
+                                    params_to_clip = []
+                                    params_to_clip.extend(lossweightMLP.parameters())
+                                    accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+
+                                MLP_optim.step()
+
+                            lr_scheduler.step()
+
+                            if args.edm2_loss_weighting and mlp_lr_scheduler is not None:
+                                mlp_lr_scheduler.step()
+
+                            optimizer.zero_grad(set_to_none=True)
+
+                            if args.edm2_loss_weighting:
+                                MLP_optim.zero_grad(set_to_none=True)
+
+                            # Reset accumulation counter
+                            accumulation_counter = 0
+                        else:
+                            if args.edm2_loss_weighting:
+                                edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                                if edm2_loss_weighting_max_grad_norm != 0.0:
+                                    params_to_clip = []
+                                    params_to_clip.extend(lossweightMLP.parameters())
+                                    accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+
+                                MLP_optim.step()
+
+                                if mlp_lr_scheduler is not None:
+                                    mlp_lr_scheduler.step()
+
+                                MLP_optim.zero_grad(set_to_none=True)
+
+                            # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
+                            lr_scheduler.step()
+                            if args.fused_optimizer_groups:
+                                for i in range(1, len(optimizers)):
+                                    lr_schedulers[i].step()
+
+                        progress_bar.update(1)
+                        global_step += 1
+
+                        if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
+                            plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
+
+                        sdxl_train_util.sample_images(
+                            accelerator,
+                            args,
+                            None,
+                            global_step,
+                            accelerator.device,
+                            vae,
+                            tokenizers,
+                            [text_encoder1, text_encoder2],
+                            unet,
+                        )
+
+                        if cyclic_val_dataloader is not None:
+                            current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+
+                        # 指定ステップごとにモデルを保存
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                                sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                                    args,
+                                    False,
+                                    accelerator,
+                                    src_path,
+                                    save_stable_diffusion_format,
+                                    use_safetensors,
+                                    save_dtype,
+                                    epoch,
+                                    num_train_epochs,
+                                    global_step,
+                                    accelerator.unwrap_model(text_encoder1),
+                                    accelerator.unwrap_model(text_encoder2),
+                                    accelerator.unwrap_model(unet),
+                                    vae,
+                                    logit_scale,
+                                    ckpt_info,
+                                )
+                                if args.edm2_loss_weighting:
+                                    train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                                            False, 
+                                                                                            accelerator.unwrap_model(lossweightMLP),
+                                                                                            use_safetensors,
+                                                                                            epoch,
+                                                                                            num_train_epochs,
+                                                                                            global_step)
+
+                current_loss = loss.detach().item() / grad_accum_loss_scaling  # 平均なのでbatch sizeは関係ないはず
+                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                if args.edm2_loss_weighting:
+                    current_loss_scaled = loss_scaled.detach().item() / grad_accum_loss_scaling
+                    loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
+                    average_loss_scaled: float = loss_scaled_recorder.moving_average
                 else:
-                    append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
+                    current_loss_scaled = None
+                    average_loss_scaled = None
+                avr_loss: float = loss_recorder.moving_average
+                logs = {"loss": current_loss, "avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
 
-                if mlp_lr_scheduler is not None:
-                    logs[f"lr/edm2"] = mlp_lr_scheduler.get_last_lr()[0]
+                progress_bar.set_postfix(**logs)
 
-                accelerator.log(logs, step=global_step)
+                if val_logs:
+                    logs = {**val_logs, **logs}
 
-            if global_step >= args.max_train_steps:
-                break
+                if args.edm2_loss_weighting:
+                    logs = {"loss/current_loss_scaled": current_val_loss, "loss/average_scaled": average_loss_scaled, **logs}
+
+                if len(accelerator.trackers) > 0:
+                    if block_lrs is None:
+                        train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
+                    else:
+                        append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
+
+                    if mlp_lr_scheduler is not None:
+                        logs[f"lr/edm2"] = mlp_lr_scheduler.get_last_lr()[0]
+
+                    accelerator.log(logs, step=global_step)
+
+                if global_step >= args.max_train_steps:
+                    break
+
+        else:
+            for step, batch in enumerate(train_dataloader):
+                current_step.value = global_step
+
+                if args.fused_optimizer_groups:
+                    optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
+
+                with accelerator.accumulate(*training_models, lossweightMLP) if args.edm2_loss_weighting else accelerator.accumulate(*training_models):
+                    if "latents" in batch and batch["latents"] is not None:
+                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                    else:
+                        with torch.no_grad():
+                            # latentに変換
+                            latents = vae.encode(batch["images"].to(vae_dtype)).latent_dist.sample().to(weight_dtype)
+
+                            # NaNが含まれていれば警告を表示し0に置き換える
+                            if torch.any(torch.isnan(latents)):
+                                accelerator.print("NaN found in latents, replacing with zeros")
+                                latents = torch.nan_to_num(latents, 0, out=latents)
+                    latents = latents * sdxl_model_util.VAE_SCALE_FACTOR
+
+                    text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
+                    if text_encoder_outputs_list is not None:
+                        # Text Encoder outputs are cached
+                        encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoder_outputs_list
+                        encoder_hidden_states1 = encoder_hidden_states1.to(accelerator.device, dtype=weight_dtype)
+                        encoder_hidden_states2 = encoder_hidden_states2.to(accelerator.device, dtype=weight_dtype)
+                        pool2 = pool2.to(accelerator.device, dtype=weight_dtype)
+                    else:
+                        input_ids1, input_ids2 = batch["input_ids_list"]
+                        with torch.set_grad_enabled(args.train_text_encoder):
+                            # Get the text embedding for conditioning
+                            if args.weighted_captions:
+                                input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                                encoder_hidden_states1, encoder_hidden_states2, pool2 = (
+                                    text_encoding_strategy.encode_tokens_with_weights(
+                                        tokenize_strategy,
+                                        [text_encoder1, text_encoder2, accelerator.unwrap_model(text_encoder2)],
+                                        input_ids_list,
+                                        weights_list,
+                                    )
+                                )
+                            else:
+                                input_ids1 = input_ids1.to(accelerator.device)
+                                input_ids2 = input_ids2.to(accelerator.device)
+                                encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoding_strategy.encode_tokens(
+                                    tokenize_strategy,
+                                    [text_encoder1, text_encoder2, accelerator.unwrap_model(text_encoder2)],
+                                    [input_ids1, input_ids2],
+                                )
+                            if args.full_fp16:
+                                encoder_hidden_states1 = encoder_hidden_states1.to(weight_dtype)
+                                encoder_hidden_states2 = encoder_hidden_states2.to(weight_dtype)
+                                pool2 = pool2.to(weight_dtype)
+
+                    # get size embeddings
+                    orig_size = batch["original_sizes_hw"]
+                    crop_size = batch["crop_top_lefts"]
+                    target_size = batch["target_sizes_hw"]
+                    embs = sdxl_train_util.get_size_embeddings(orig_size, crop_size, target_size, accelerator.device).to(weight_dtype)
+
+                    # concat embeddings
+                    vector_embedding = torch.cat([pool2, embs], dim=1).to(weight_dtype)
+                    text_embedding = torch.cat([encoder_hidden_states1, encoder_hidden_states2], dim=2).to(weight_dtype)
+
+                    # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                    # with noise offset and/or multires noise if specified
+                    noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+
+                    noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype
+
+                    # Predict the noise residual
+                    with accelerator.autocast():
+                        noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
+
+                    if args.v_parameterization:
+                        # v-parameterization training
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
+
+                    huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+                    if (
+                        args.min_snr_gamma
+                        or args.scale_v_pred_loss_like_noise_pred
+                        or args.v_pred_like_loss
+                        or args.debiased_estimation_loss
+                        or args.masked_loss
+                        or args.loss_multipler 
+                        or args.loss_multiplier
+                        or args.edm2_loss_weighting
+                        or args.sangoi_loss_modifier
+                    ):
+                        # do not mean over batch dimension for snr weight or scale v-pred loss
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean([1, 2, 3])
+
+                        if args.sangoi_loss_modifier:
+                            # Min SNR should be zero for zero_terminal_snr
+                            if args.zero_terminal_snr:
+                                min_snr = 0
+                            else:
+                                min_snr = float(args.sangoi_loss_modifier_min_snr)
+
+                            loss = loss * train_util.sangoi_loss_modifier(timesteps, 
+                                                                    noise_pred.float(), 
+                                                                    target.float(), 
+                                                                    noise_scheduler,
+                                                                    min_snr,
+                                                                    float(args.sangoi_loss_modifier_max_snr))
+
+                        if args.min_snr_gamma:
+                            loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                        if args.scale_v_pred_loss_like_noise_pred:
+                            loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                        if args.v_pred_like_loss:
+                            loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
+                        if args.debiased_estimation_loss:
+                            loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                        if args.loss_multipler or args.loss_multiplier:
+                            loss.mul_(float(args.loss_multipler or args.loss_multiplier) if args.loss_multipler is not None or args.loss_multiplier is not None else 1.0)
+
+                        # For logging
+                        pre_scaling_loss = loss.mean()
+
+                        if args.edm2_loss_weighting:
+                            loss, loss_scaled = lossweightMLP(loss, timesteps)
+                            loss_scaled = loss_scaled.mean()
+
+                        loss = loss.mean()  # Mean over batch
+                    else:
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "mean", huber_c)
+                        pre_scaling_loss = loss
+
+                    accelerator.backward(loss)
+
+                    loss = pre_scaling_loss
+
+                    if not (args.fused_backward_pass or args.fused_optimizer_groups):
+                        if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                            params_to_clip = []
+                            for m in training_models:
+                                params_to_clip.extend(m.parameters())
+                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                        optimizer.step()
+
+                        if args.edm2_loss_weighting:
+                            edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                            if accelerator.sync_gradients and edm2_loss_weighting_max_grad_norm != 0.0:
+                                params_to_clip = []
+                                params_to_clip.extend(lossweightMLP.parameters())
+                                accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+
+                            MLP_optim.step()
+
+                        lr_scheduler.step()
+
+                        if args.edm2_loss_weighting and mlp_lr_scheduler is not None:
+                            mlp_lr_scheduler.step()
+
+                        optimizer.zero_grad(set_to_none=True)
+
+                        if args.edm2_loss_weighting:
+                            MLP_optim.zero_grad(set_to_none=True)
+                    else:
+                        if args.edm2_loss_weighting:
+                            edm2_loss_weighting_max_grad_norm = float(args.edm2_loss_weighting_max_grad_norm) if args.edm2_loss_weighting_max_grad_norm is not None else 1.0
+                            if edm2_loss_weighting_max_grad_norm != 0.0:
+                                params_to_clip = []
+                                params_to_clip.extend(lossweightMLP.parameters())
+                                accelerator.clip_grad_norm_(params_to_clip, edm2_loss_weighting_max_grad_norm).item()
+
+                            MLP_optim.step()
+
+                            if mlp_lr_scheduler is not None:
+                                mlp_lr_scheduler.step()
+                                
+                            MLP_optim.zero_grad(set_to_none=True)
+
+                        # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
+                        lr_scheduler.step()
+                        if args.fused_optimizer_groups:
+                            for i in range(1, len(optimizers)):
+                                lr_schedulers[i].step()
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
+
+                    if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
+                        plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
+
+                    sdxl_train_util.sample_images(
+                        accelerator,
+                        args,
+                        None,
+                        global_step,
+                        accelerator.device,
+                        vae,
+                        tokenizers,
+                        [text_encoder1, text_encoder2],
+                        unet,
+                    )
+
+                    if cyclic_val_dataloader is not None:
+                        current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+
+                    # 指定ステップごとにモデルを保存
+                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                            sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                                args,
+                                False,
+                                accelerator,
+                                src_path,
+                                save_stable_diffusion_format,
+                                use_safetensors,
+                                save_dtype,
+                                epoch,
+                                num_train_epochs,
+                                global_step,
+                                accelerator.unwrap_model(text_encoder1),
+                                accelerator.unwrap_model(text_encoder2),
+                                accelerator.unwrap_model(unet),
+                                vae,
+                                logit_scale,
+                                ckpt_info,
+                            )
+                            if args.edm2_loss_weighting:
+                                train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                                        False, 
+                                                                                        accelerator.unwrap_model(lossweightMLP),
+                                                                                        use_safetensors,
+                                                                                        epoch,
+                                                                                        num_train_epochs,
+                                                                                        global_step)
+
+                current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                if args.edm2_loss_weighting:
+                    current_loss_scaled = loss_scaled.detach().item()
+                    loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
+                    average_loss_scaled: float = loss_scaled_recorder.moving_average
+                else:
+                    current_loss_scaled = None
+                    average_loss_scaled = None
+                avr_loss: float = loss_recorder.moving_average
+                logs = {"loss": current_loss, "avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+
+                progress_bar.set_postfix(**logs)
+
+                if val_logs:
+                    logs = {**val_logs, **logs}
+
+                if args.edm2_loss_weighting:
+                    logs = {"loss/current_loss_scaled": current_val_loss, "loss/average_scaled": average_loss_scaled, **logs}
+
+                if len(accelerator.trackers) > 0:
+                    if block_lrs is None:
+                        train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
+                    else:
+                        append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
+
+                    if mlp_lr_scheduler is not None:
+                        logs[f"lr/edm2"] = mlp_lr_scheduler.get_last_lr()[0]
+
+                    accelerator.log(logs, step=global_step)
+
+                if global_step >= args.max_train_steps:
+                    break
 
         if len(accelerator.trackers) > 0:
             logs = {"loss/epoch": loss_recorder.moving_average}
@@ -1470,6 +1829,47 @@ def setup_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="Use immiscible diffusion to generate noised latents instead of standard noise scheduler. Mutually exclusive with ip noise gamma.",
         )
+
+    parser.add_argument(
+            "--sangoi_loss_modifier",
+            action="store_true",
+            help="Apply sangoi loss modifier to loss.",
+        )
+    
+    parser.add_argument(
+            "--sangoi_loss_modifier_min_snr",
+            type=float,
+            default=1e-4,
+            help="Min SNR limit for sangoi loss modifier.",
+        )
+    
+    parser.add_argument(
+            "--sangoi_loss_modifier_max_snr",
+            type=float,
+            default=100,
+            help="Max SNR limit for sangoi loss modifier.",
+    )
+
+    parser.add_argument(
+        "--laplace_timestep_sampling_mu",
+        type=float,
+        default=None,
+        help="Mu parameter for Laplace-based timestep sampling (optional)."
+    )
+    parser.add_argument(
+        "--laplace_timestep_sampling_b",
+        type=float,
+        default=None,
+        help="b parameter for Laplace-based timestep sampling (optional)."
+    )
+
+    parser.add_argument(
+        "--stochastic_accumulation",
+        action="store_true",
+        help="Stochastic accumulation"
+    )
+
+
 
     return parser
 

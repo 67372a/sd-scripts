@@ -3502,6 +3502,55 @@ def get_sai_model_spec(
     )
     return metadata
 
+def sangoi_loss_modifier( 
+                            timesteps: torch.Tensor, 
+                            predicted: torch.Tensor, 
+                            target: torch.Tensor, 
+                            noise_scheduler,
+                            min_snr: float = 1e-4,
+                            max_snr: float = 100,
+                            eps: float = 1e-12) -> torch.Tensor:
+    """
+    Source: https://github.com/sangoi-exe/sangoi-loss-function
+    
+    Computes a loss modifier based on the Mean Absolute Percentage Error (MAPE) and the Signal-to-Noise Ratio (SNR).
+    This modifier adjusts the loss according to the prediction accuracy and the difficulty of the prediction task.
+
+    Args:
+        timesteps (Tensor): The current training step's timesteps.
+        predicted (Tensor): Predicted values from the neural network.
+        target (Tensor): Ground truth target values.
+        noise_scheduler: The noise scheduler being used by the training process.
+        min_snr (float): The minimum value for snr, clamping all values less than to this value.
+        max_snr (float): The maximum value for snr, clamping all values greater than to this value.
+        eps (float): To prevent division by zero and provide numeric stablity
+
+    Returns:
+        Tensor: A tensor of weights per example to modify the loss.
+    """
+
+    # Obtain the SNR for each timestep
+    snr = noise_scheduler.all_snr[timesteps.long()]
+    # Clamp the SNR values to the defined range to avoid extreme values
+    snr = torch.clamp(snr, min=min_snr, max=max_snr)
+
+    # Compute the Mean Absolute Percentage Error (MAPE)
+    mape = torch.abs((target - predicted) / (target + eps))
+    # Normalize MAPE values between 0 and 1
+    mape = torch.clamp(mape, min=0, max=1)
+    # Calculate the average MAPE per example across spatial dimensions
+    mape = mape.mean(dim=[1, 2, 3])
+
+    # Compute the SNR weight using the natural logarithm (adding 1 to avoid log(0))
+    snr_weight = torch.log(snr + 1)
+    # Invert MAPE to represent accuracy instead of error
+    mape_reward = 1 - mape
+    # Calculate the combined weight using the negative exponential of the product of MAPE reward and SNR weight
+    combined_weight = torch.exp(-mape_reward * snr_weight)
+
+    # Return the tensor of weights per example to modify the loss
+    return combined_weight
+
 
 def add_sd_models_arguments(parser: argparse.ArgumentParser):
     # for pretrained models
