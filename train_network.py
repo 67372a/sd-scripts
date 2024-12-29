@@ -490,19 +490,6 @@ class NetworkTrainer:
 
             plt.close()
 
-    def calculate_val_loss_check(self, args, global_step, epoch_step, val_dataloader, train_dataloader) -> bool:
-        if val_dataloader is None:
-            return False
-
-        if global_step != 0 and global_step < args.max_train_steps:
-            if args.validation_every_n_step is not None:
-                if global_step % int(args.validation_every_n_step) != 0:
-                    return False
-            else:
-                if epoch_step != len(train_dataloader) - 1:
-                    return False
-        return True
-
     def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
         total_loss = 0.0
         timesteps_list = [10, 350, 500, 650, 990]    
@@ -631,7 +618,7 @@ class NetworkTrainer:
                            accelerator, 
                            args, 
                            train_text_encoder=True):
-        if not self.calculate_val_loss_check(args,global_step,epoch_step,val_dataloader,train_dataloader):
+        if not train_util.calculate_val_loss_check(args,global_step,epoch_step,val_dataloader,train_dataloader):
             return None, None, None
    
         # Get current seeds from all random number generators
@@ -1624,10 +1611,10 @@ class NetworkTrainer:
             }
 
         # For --sample_at_first
-        if train_util.sample_images_check(args, 0, global_step) or self.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+        if train_util.sample_images_check(args, 0, global_step) or train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
             optimizer_eval_fn()
             self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
-            if self.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+            if train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
                 current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
             optimizer_train_fn()
 
@@ -1931,14 +1918,14 @@ class NetworkTrainer:
                         global_step += 1
 
                         if (train_util.sample_images_check(args, None, global_step) or 
-                            self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
+                            train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
                             optimizer_eval_fn()                        
                             self.sample_images(
                                 accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                             )
 
-                            if self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
+                            if train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
                                 current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, skipped_dataloader or train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
                             else:
                                 current_val_loss, average_val_loss, val_logs = None, None, None
@@ -2269,7 +2256,7 @@ class NetworkTrainer:
                             self.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                         if (train_util.sample_images_check(args, None, global_step) or 
-                            self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
+                            train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
                             optimizer_eval_fn()
 
@@ -2277,7 +2264,7 @@ class NetworkTrainer:
                                 accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                             )
 
-                            if self.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
+                            if train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
                                 current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, step, 
                                                                                                        skipped_dataloader or train_dataloader, 
                                                                                                        val_loss_recorder, 

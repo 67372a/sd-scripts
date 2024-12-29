@@ -642,6 +642,8 @@ def train(args):
     else:
         _, _, optimizer = train_util.get_optimizer(args, trainable_params=params_to_optimize)
 
+    optimizer_train_fn, optimizer_eval_fn = train_util.get_optimizer_train_eval_fn(optimizer, args)
+
     # prepare dataloader
     # strategies are set here because they cannot be referenced in another process. Copy them with the dataset
     # some strategies can be None
@@ -910,17 +912,20 @@ def train(args):
             init_kwargs=init_kwargs,
         )
 
-    # For --sample_at_first
-    sdxl_train_util.sample_images(
-        accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, [text_encoder1, text_encoder2], unet
-    )
+    if train_util.sample_images_check(args, 0, global_step) or train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+        optimizer_eval_fn()
+        # For --sample_at_first
+        sdxl_train_util.sample_images(
+            accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, [text_encoder1, text_encoder2], unet
+        )
 
-    current_val_loss, average_val_loss, val_logs = None, None, None
-    if cyclic_val_dataloader is not None:
-        current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
-    if len(accelerator.trackers) > 0:
-        # log empty object to commit the sample images to wandb
-        accelerator.log({}, step=0)
+        current_val_loss, average_val_loss, val_logs = None, None, None
+        if train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+            current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+        if len(accelerator.trackers) > 0:
+            # log empty object to commit the sample images to wandb
+            accelerator.log({}, step=0)
+        optimizer_train_fn()
 
     loss_recorder = train_util.LossRecorder()
     val_loss_recorder = train_util.LossRecorder()
@@ -1168,52 +1173,59 @@ def train(args):
                         if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                             plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
-                        sdxl_train_util.sample_images(
-                            accelerator,
-                            args,
-                            None,
-                            global_step,
-                            accelerator.device,
-                            vae,
-                            tokenizers,
-                            [text_encoder1, text_encoder2],
-                            unet,
-                        )
+                        if (train_util.sample_images_check(args, None, global_step) or 
+                            train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
+                            args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
+                            optimizer_eval_fn()
+                            sdxl_train_util.sample_images(
+                                accelerator,
+                                args,
+                                None,
+                                global_step,
+                                accelerator.device,
+                                vae,
+                                tokenizers,
+                                [text_encoder1, text_encoder2],
+                                unet,
+                            )
 
-                        if cyclic_val_dataloader is not None:
-                            current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                            if train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
+                                current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
 
-                        # 指定ステップごとにモデルを保存
-                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                            accelerator.wait_for_everyone()
-                            if accelerator.is_main_process:
-                                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                                sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
-                                    args,
-                                    False,
-                                    accelerator,
-                                    src_path,
-                                    save_stable_diffusion_format,
-                                    use_safetensors,
-                                    save_dtype,
-                                    epoch,
-                                    num_train_epochs,
-                                    global_step,
-                                    accelerator.unwrap_model(text_encoder1),
-                                    accelerator.unwrap_model(text_encoder2),
-                                    accelerator.unwrap_model(unet),
-                                    vae,
-                                    logit_scale,
-                                    ckpt_info,
-                                )
-                                if args.edm2_loss_weighting:
-                                    train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
-                                                                                            False, 
-                                                                                            accelerator.unwrap_model(lossweightMLP),
-                                                                                            use_safetensors,
-                                                                                            epoch,
-                                                                                            num_train_epochs,
-                                                                                            global_step)
+                            # 指定ステップごとにモデルを保存
+                            if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                                accelerator.wait_for_everyone()
+                                if accelerator.is_main_process:
+                                    src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                                    sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                                        args,
+                                        False,
+                                        accelerator,
+                                        src_path,
+                                        save_stable_diffusion_format,
+                                        use_safetensors,
+                                        save_dtype,
+                                        epoch,
+                                        num_train_epochs,
+                                        global_step,
+                                        accelerator.unwrap_model(text_encoder1),
+                                        accelerator.unwrap_model(text_encoder2),
+                                        accelerator.unwrap_model(unet),
+                                        vae,
+                                        logit_scale,
+                                        ckpt_info,
+                                    )
+                                    if args.edm2_loss_weighting:
+                                        train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                                                False, 
+                                                                                                accelerator.unwrap_model(lossweightMLP),
+                                                                                                use_safetensors,
+                                                                                                epoch,
+                                                                                                num_train_epochs,
+                                                                                                global_step)
+                            optimizer_train_fn()
+                        else:
+                            current_val_loss, average_val_loss, val_logs = None, None, None                        
 
                 current_loss = loss.detach().item() / grad_accum_loss_scaling  # 平均なのでbatch sizeは関係ないはず
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -1446,53 +1458,60 @@ def train(args):
                     if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                         plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
-                    sdxl_train_util.sample_images(
-                        accelerator,
-                        args,
-                        None,
-                        global_step,
-                        accelerator.device,
-                        vae,
-                        tokenizers,
-                        [text_encoder1, text_encoder2],
-                        unet,
-                    )
+                    if (train_util.sample_images_check(args, None, global_step) or 
+                        train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
+                        args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
+                        optimizer_eval_fn()
+                        sdxl_train_util.sample_images(
+                            accelerator,
+                            args,
+                            None,
+                            global_step,
+                            accelerator.device,
+                            vae,
+                            tokenizers,
+                            [text_encoder1, text_encoder2],
+                            unet,
+                        )
 
-                    if cyclic_val_dataloader is not None:
-                        current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                        if train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader):
+                            current_val_loss, average_val_loss, val_logs = calculate_val_loss(global_step, step, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
 
-                    # 指定ステップごとにモデルを保存
-                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                        accelerator.wait_for_everyone()
-                        if accelerator.is_main_process:
-                            src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                            sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
-                                args,
-                                False,
-                                accelerator,
-                                src_path,
-                                save_stable_diffusion_format,
-                                use_safetensors,
-                                save_dtype,
-                                epoch,
-                                num_train_epochs,
-                                global_step,
-                                accelerator.unwrap_model(text_encoder1),
-                                accelerator.unwrap_model(text_encoder2),
-                                accelerator.unwrap_model(unet),
-                                vae,
-                                logit_scale,
-                                ckpt_info,
-                            )
-                            if args.edm2_loss_weighting:
-                                train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
-                                                                                        False, 
-                                                                                        accelerator.unwrap_model(lossweightMLP),
-                                                                                        use_safetensors,
-                                                                                        epoch,
-                                                                                        num_train_epochs,
-                                                                                        global_step)
-
+                        # 指定ステップごとにモデルを保存
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                                sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                                    args,
+                                    False,
+                                    accelerator,
+                                    src_path,
+                                    save_stable_diffusion_format,
+                                    use_safetensors,
+                                    save_dtype,
+                                    epoch,
+                                    num_train_epochs,
+                                    global_step,
+                                    accelerator.unwrap_model(text_encoder1),
+                                    accelerator.unwrap_model(text_encoder2),
+                                    accelerator.unwrap_model(unet),
+                                    vae,
+                                    logit_scale,
+                                    ckpt_info,
+                                )
+                                if args.edm2_loss_weighting:
+                                    train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                                            False, 
+                                                                                            accelerator.unwrap_model(lossweightMLP),
+                                                                                            use_safetensors,
+                                                                                            epoch,
+                                                                                            num_train_epochs,
+                                                                                            global_step)
+                        optimizer_train_fn()
+                    else:
+                        current_val_loss, average_val_loss, val_logs = None, None, None
+                        
                 current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 if args.edm2_loss_weighting:
@@ -1533,47 +1552,51 @@ def train(args):
 
         accelerator.wait_for_everyone()
 
-        if args.save_every_n_epochs is not None:
-            if accelerator.is_main_process:
-                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
-                    args,
-                    True,
-                    accelerator,
-                    src_path,
-                    save_stable_diffusion_format,
-                    use_safetensors,
-                    save_dtype,
-                    epoch,
-                    num_train_epochs,
-                    global_step,
-                    accelerator.unwrap_model(text_encoder1),
-                    accelerator.unwrap_model(text_encoder2),
-                    accelerator.unwrap_model(unet),
-                    vae,
-                    logit_scale,
-                    ckpt_info,
-                )
-                if args.edm2_loss_weighting:
-                    train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
-                                                                            True, 
-                                                                            accelerator.unwrap_model(lossweightMLP),
-                                                                            use_safetensors,
-                                                                            epoch,
-                                                                            num_train_epochs,
-                                                                            global_step)
+        if (train_util.sample_images_check(args, epoch + 1, global_step) or 
+            args.save_every_n_epochs is not None):
+            optimizer_eval_fn()
+            if args.save_every_n_epochs is not None:
+                if accelerator.is_main_process:
+                    src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                    sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                        args,
+                        True,
+                        accelerator,
+                        src_path,
+                        save_stable_diffusion_format,
+                        use_safetensors,
+                        save_dtype,
+                        epoch,
+                        num_train_epochs,
+                        global_step,
+                        accelerator.unwrap_model(text_encoder1),
+                        accelerator.unwrap_model(text_encoder2),
+                        accelerator.unwrap_model(unet),
+                        vae,
+                        logit_scale,
+                        ckpt_info,
+                    )
+                    if args.edm2_loss_weighting:
+                        train_util.save_loss_weights_model_on_epoch_end_or_stepwise(args, 
+                                                                                True, 
+                                                                                accelerator.unwrap_model(lossweightMLP),
+                                                                                use_safetensors,
+                                                                                epoch,
+                                                                                num_train_epochs,
+                                                                                global_step)
 
-        sdxl_train_util.sample_images(
-            accelerator,
-            args,
-            epoch + 1,
-            global_step,
-            accelerator.device,
-            vae,
-            tokenizers,
-            [text_encoder1, text_encoder2],
-            unet,
-        )
+            sdxl_train_util.sample_images(
+                accelerator,
+                args,
+                epoch + 1,
+                global_step,
+                accelerator.device,
+                vae,
+                tokenizers,
+                [text_encoder1, text_encoder2],
+                unet,
+            )
+            optimizer_train_fn()
 
     is_main_process = accelerator.is_main_process
     # if is_main_process:
@@ -1583,6 +1606,7 @@ def train(args):
 
     accelerator.end_training()
 
+    optimizer_eval_fn()
     if args.save_state or args.save_state_on_train_end:
         train_util.save_state_on_train_end(args, accelerator)
 

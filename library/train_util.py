@@ -5197,7 +5197,7 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
 
 
 def get_optimizer_train_eval_fn(optimizer: Optimizer, args: argparse.Namespace) -> Tuple[Callable, Callable]:
-    if not is_schedulefree_optimizer(optimizer, args) and not is_schedulefree_wrapper_optimizer(args):
+    if (not is_schedulefree_optimizer(optimizer, args) and not is_schedulefree_wrapper_optimizer(args)) or args.fused_optimizer_groups:
         # return dummy func
         return lambda: None, lambda: None
 
@@ -6416,6 +6416,19 @@ def get_gamma_if_needed(args, loss_type: str, global_step: int, final_step: int)
         gamma = gamma_max
     
     return gamma
+
+def calculate_val_loss_check(args, global_step, epoch_step, val_dataloader, train_dataloader) -> bool:
+    if val_dataloader is None:
+        return False
+
+    if global_step != 0 and global_step < args.max_train_steps:
+        if args.validation_every_n_step is not None:
+            if global_step % int(args.validation_every_n_step) != 0:
+                return False
+        else:
+            if epoch_step != len(train_dataloader) - 1:
+                return False
+    return True
 
 
 def conditional_loss(
