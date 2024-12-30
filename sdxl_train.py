@@ -1374,7 +1374,7 @@ def train(args):
                                                                     min_snr,
                                                                     float(args.sangoi_loss_modifier_max_snr))
 
-                        if args.min_snr_gamma:
+                        if args.min_snr_gamma and not args.sangoi_loss_modifier:
                             loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
                         if args.scale_v_pred_loss_like_noise_pred:
                             loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
