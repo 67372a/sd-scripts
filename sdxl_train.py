@@ -734,6 +734,10 @@ def train(args):
 
             library.adafactor_fused.patch_adafactor_fused(optimizer)
 
+        assert (
+            hasattr(optimizer, "step_param") and callable(optimizer.step_param)
+        ), "fused_backward_pass currently only works with optimizers that have a step_param function defined."
+
         for param_group in optimizer.param_groups:
             for parameter in param_group["params"]:
                 if parameter.requires_grad:
