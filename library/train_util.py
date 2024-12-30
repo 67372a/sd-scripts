@@ -33,6 +33,10 @@ import subprocess
 from io import BytesIO
 import toml
 from scipy.optimize import linear_sum_assignment
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to 'Agg', non-interactive backend
+import matplotlib.pyplot as plt
+plt.ioff() # Explicitly turn off interactive mode
 
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -6884,6 +6888,48 @@ def sample_image_inference(
 
         # not to commit images to avoid inconsistency between training and logging steps
         wandb_tracker.log({f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False)  # positive prompt as a caption
+
+def plot_dynamic_loss_weighting(args, step: int, model, num_timesteps: int = 1000, device="cpu"):
+    """
+    Plot the dynamic loss weighting across timesteps using the learned parameters of the DynamicLossModule.
+
+    :param model: The DynamicLossModule instance (after training).
+    :param num_timesteps: Total number of timesteps to plot.
+    :param device: Device to run computations on.
+    """
+    with torch.inference_mode():
+        # Generate a range of timesteps
+        timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to(device).int()
+
+        model.train(False)
+        loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
+        model.train(True)
+
+        # Plot the dynamic loss weights over time
+        plt.figure(figsize=(10, 6))
+        plt.plot(timesteps.cpu().numpy(), loss.cpu().numpy(),
+                label=f'Dynamic Loss Weight\nStep: {step}')
+        plt.xlabel('Timesteps')
+        plt.ylabel('Weight')
+        plt.title('Dynamic Loss Weighting vs Timesteps')
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(bottom=1)
+        if args.edm2_loss_weighting_generate_graph_y_limit is not None:
+            plt.ylim(top=int(args.edm2_loss_weighting_generate_graph_y_limit))
+        plt.xlim(left=0, right=num_timesteps)
+        plt.xticks(np.arange(0, num_timesteps+1, 100)) 
+        # plt.show()
+
+        try:
+            os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
+            output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
+            os.makedirs(output_dir, exist_ok=True)
+            plt.savefig(os.path.join(output_dir, f"weighting_step_{str(step).zfill(7)}.png"))
+        except Exception as e:
+            logger.warning(f"Failed to save weighting graph image. Due to: {e}")
+
+        plt.close()
 
 
 # endregion

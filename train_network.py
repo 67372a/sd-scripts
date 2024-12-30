@@ -14,10 +14,6 @@ from tools.grokfast import Gradfilter_ma, Gradfilter_ema
 import numpy as np
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
-import matplotlib
-matplotlib.use('Agg')  # Set the backend to 'Agg', non-interactive backend
-import matplotlib.pyplot as plt
-plt.ioff() # Explicitly turn off interactive mode
 
 from tqdm import tqdm
 
@@ -430,65 +426,6 @@ class NetworkTrainer:
 
     def plot_dynamic_loss_weighting_check(self, args, global_step):
         return args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps)
-
-    def plot_dynamic_loss_weighting(self, args, step, model, num_timesteps=1000, device="cpu"):
-        """
-        Plot the dynamic loss weighting across timesteps using the learned parameters of the DynamicLossModule.
-
-        :param model: The DynamicLossModule instance (after training).
-        :param num_timesteps: Total number of timesteps to plot.
-        :param scale: Scaling factor for the input time.
-        :param device: Device to run computations on.
-        """
-        with torch.inference_mode():
-            # Generate a range of timesteps
-            timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to(device).int()
-
-            model.train(False)
-            loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
-            model.train(True)
-
-            # Plot the dynamic loss weights over time
-            plt.figure(figsize=(10, 6))
-            weighting = loss.cpu().numpy()
-            plt.plot(timesteps.cpu().numpy(), weighting,
-                    label=f'Dynamic Loss Weight\nStep: {step}')
-            plt.xlabel('Timesteps')
-            plt.ylabel('Weight')
-            plt.yscale(args.edm2_loss_weighting_generate_graph_y_scale)
-            plt.title('Dynamic Loss Weighting vs Timesteps')
-            plt.legend()
-            plt.grid(True)
-            plt.ylim(bottom=1)
-            if args.edm2_loss_weighting_generate_graph_y_limit is not None:
-                plt.ylim(top=int(args.edm2_loss_weighting_generate_graph_y_limit))
-            plt.xlim(left=0, right=num_timesteps)
-
-            # Set major ticks every 100
-            major_ticks = np.arange(0, 1000+1, 100)
-            minor_ticks = np.arange(0, 1000+1, 50)
-
-            # Set major ticks and labels
-            plt.xticks(major_ticks, [f'{x}\n({y:.2f})' for x, y in zip(major_ticks, [*weighting[::100], weighting[999]])])
-
-            # Set minor ticks
-            plt.xticks(minor_ticks, minor=True)
-
-            # Make minor ticks visible
-            plt.tick_params(which='minor', length=4)
-
-            # Adjust bottom margin
-            plt.subplots_adjust(bottom=0.15)
-
-            try:
-                os.makedirs(args.edm2_loss_weighting_generate_graph_output_dir, exist_ok=True)
-                output_dir = os.path.join(args.edm2_loss_weighting_generate_graph_output_dir, args.output_name)
-                os.makedirs(output_dir, exist_ok=True)
-                plt.savefig(os.path.join(output_dir, f"weighting_step_{str(step).zfill(7)}.png"))
-            except Exception as e:
-                logger.warning(f"Failed to save weighting graph image. Due to: {e}")
-
-            plt.close()
 
     def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
         total_loss = 0.0
@@ -1521,7 +1458,7 @@ class NetworkTrainer:
             lossweightMLP, MLP_optim = accelerator.prepare(lossweightMLP, MLP_optim)
 
             if args.edm2_loss_weighting_generate_graph:
-                self.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
+                train_util.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
         else:
             mlp_lr_scheduler = None
             lossweightMLP = None
@@ -2253,7 +2190,7 @@ class NetworkTrainer:
                         global_step += 1
 
                         if self.plot_dynamic_loss_weighting_check(args, global_step):
-                            self.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
+                            train_util.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
