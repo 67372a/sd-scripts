@@ -12,6 +12,7 @@ import random
 import tools.edm2_loss_mm as edm2_loss_mm
 import ast
 import contextlib
+import transformers
 
 from tqdm import tqdm
 
@@ -720,17 +721,26 @@ def train(args):
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
 
-    if args.fused_backward_pass:
-        # use fused optimizer for backward pass: other optimizers will be supported in the future
-        import library.adafactor_fused
+    # Used for non-accelerator managed syncing, track if it's time to sync
+    sync_gradients: bool = False
 
-        library.adafactor_fused.patch_adafactor_fused(optimizer)
+    # Check if we should be doing manual grad sync without accelerator accumlator
+    manual_grad_sync: bool = args.full_bf16 and args.stochastic_accumulator
+
+    if args.fused_backward_pass:
+        if isinstance(optimizer, transformers.optimization.Adafactor):
+            # use fused optimizer for backward pass: other optimizers will be supported in the future
+            import library.adafactor_fused
+
+            library.adafactor_fused.patch_adafactor_fused(optimizer)
+
         for param_group in optimizer.param_groups:
             for parameter in param_group["params"]:
                 if parameter.requires_grad:
 
                     def __grad_hook(tensor: torch.Tensor, param_group=param_group):
-                        if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                        if (((not manual_grad_sync and accelerator.sync_gradients) 
+                            or (manual_grad_sync and sync_gradients)) and args.max_grad_norm != 0.0):
                             accelerator.clip_grad_norm_(tensor, args.max_grad_norm)
                         optimizer.step_param(tensor, param_group)
                         tensor.grad = None
@@ -758,7 +768,8 @@ def train(args):
                     if parameter.requires_grad:
 
                         def optimizer_hook(parameter: torch.Tensor):
-                            if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                            if (((not manual_grad_sync and accelerator.sync_gradients) 
+                                or (manual_grad_sync and sync_gradients)) and args.max_grad_norm != 0.0):
                                 accelerator.clip_grad_norm_(parameter, args.max_grad_norm)
 
                             i = parameter_optimizer_map[parameter]
@@ -919,10 +930,10 @@ def train(args):
                     optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
 
                 # Determine whether we should synchronize gradients
-                sync_gradients = (accumulation_counter + 1) % iter_size == 0 or (step + 1 == len(train_dataloader))
+                sync_gradients: bool = (accumulation_counter + 1) % iter_size == 0 or (step + 1 == len(train_dataloader))
 
-                effective_batch_size = accumulation_counter + 1 if sync_gradients else iter_size
-                grad_accum_loss_scaling = 1.0 / effective_batch_size
+                effective_batch_size: int = accumulation_counter + 1 if sync_gradients else iter_size
+                grad_accum_loss_scaling: float = 1.0 / effective_batch_size
 
                 with determine_grad_sync_context(accelerator, sync_gradients, training_models, lossweightMLP):
                     if "latents" in batch and batch["latents"] is not None:
