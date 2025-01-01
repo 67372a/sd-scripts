@@ -601,20 +601,6 @@ class NetworkTrainer:
                 torch.cuda.set_rng_state(state, i)
 
         return current_val_loss, average_val_loss, logs
-    
-    def convert_named_modules_to_fp32(self, model):
-        for name, module in model.named_modules():
-            if 'norm' in name.lower():
-                print(f"Converting module '{name}' to FP32")
-                module.float()
-
-                # Wrap the forward method to disable autocast
-                original_forward = module.forward
-                def forward_with_fp32(*args, **kwargs):
-                    with torch.amp.autocast(enabled=False):
-                        return original_forward(*args, **kwargs)
-                module.forward = forward_with_fp32
-
 
     def train(self, args):
         session_id = random.randint(0, 2**32)
@@ -952,7 +938,7 @@ class NetworkTrainer:
 
         if bool(args.train_network_norm_modules_as_float32) if args.train_network_norm_modules_as_float32 else False:
             # Recast normalization layers and their children back to FP32
-            self.convert_named_modules_to_fp32(network)
+            train_util.convert_named_modules_to_fp32(network)
 
         unet_weight_dtype = te_weight_dtype = weight_dtype
         # Experimental Feature: Put base model into fp8 to save vram

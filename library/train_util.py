@@ -6931,6 +6931,21 @@ def plot_dynamic_loss_weighting(args, step: int, model, num_timesteps: int = 100
 
         plt.close()
 
+def convert_named_modules_to_fp32(model):
+    for name, module in model.named_modules():
+        if 'norm' in name.lower():
+            print(f"Converting module '{name}' to FP32")
+
+            # Convert module to fp32 inplace
+            module.float() 
+
+            # Wrap the forward method to disable autocast so operations are in float32
+            original_forward = module.forward
+            def forward_with_fp32(*args, **kwargs):
+                with torch.amp.autocast(enabled=False):
+                    return original_forward(*args, **kwargs)
+            module.forward = forward_with_fp32
+
 
 # endregion
 
