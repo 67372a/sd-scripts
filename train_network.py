@@ -1538,11 +1538,15 @@ class NetworkTrainer:
 
         # For --sample_at_first
         if train_util.sample_images_check(args, 0, global_step) or train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
+            #Switch network to eval mode
+            network.eval()
             optimizer_eval_fn()
             self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             if train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
                 current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+            #Switch network to train mode
             optimizer_train_fn()
+            network.train()
 
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1846,6 +1850,8 @@ class NetworkTrainer:
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
+                            #Switch network to train mode
+                            network.eval()
                             optimizer_eval_fn()                        
                             self.sample_images(
                                 accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
@@ -1878,7 +1884,9 @@ class NetworkTrainer:
                                         if args.edm2_loss_weighting:
                                             remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                             remove_model(remove_loss_weights_ckpt_name)
+                            #Switch network to train mode
                             optimizer_train_fn()
+                            network.train()
                         else:
                             current_val_loss, average_val_loss, val_logs = None, None, None
 
@@ -1930,6 +1938,8 @@ class NetworkTrainer:
                 if (train_util.sample_images_check(args, epoch + 1, global_step) or 
                     args.save_every_n_epochs is not None):
                     # 指定エポックごとにモデルを保存
+                    #Switch network to eval mode
+                    network.eval()
                     optimizer_eval_fn()
                     if args.save_every_n_epochs is not None:
                         saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
@@ -1954,7 +1964,9 @@ class NetworkTrainer:
                                 train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
                     
                     self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+                    #Switch network to train mode
                     optimizer_train_fn()
+                    network.train()
 
                 # end of epoch
 
@@ -2184,6 +2196,8 @@ class NetworkTrainer:
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
+                            #Switch network to eval mode
+                            network.eval()
                             optimizer_eval_fn()
 
                             self.sample_images(
@@ -2234,7 +2248,9 @@ class NetworkTrainer:
                                             remove_loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                             remove_model(remove_loss_weights_ckpt_name)
 
+                            #Switch network to train mode
                             optimizer_train_fn()
+                            network.train()
                         else:
                             current_val_loss, average_val_loss, val_logs = None, None, None
 
@@ -2286,6 +2302,8 @@ class NetworkTrainer:
                 if (train_util.sample_images_check(args, epoch + 1, global_step) or 
                     args.save_every_n_epochs is not None):
                     # 指定エポックごとにモデルを保存
+                    #Switch network to eval mode
+                    network.eval()
                     optimizer_eval_fn()
 
                     if args.save_every_n_epochs is not None:
@@ -2311,7 +2329,9 @@ class NetworkTrainer:
                                 train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
                     
                     self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+                    #Switch network to train mode
                     optimizer_train_fn()
+                    network.train()
 
                 # end of epoch
 
@@ -2322,6 +2342,8 @@ class NetworkTrainer:
             network = accelerator.unwrap_model(network)
 
         accelerator.end_training()
+        #Switch network to eval mode
+        network.eval()
         optimizer_eval_fn()
 
         if is_main_process and (args.save_state or args.save_state_on_train_end):
