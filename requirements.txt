@@ -12,7 +12,7 @@ lion-pytorch==0.2.3
 schedulefree==1.4
 tensorboard==2.18.0
 safetensors==0.4.5
-pooch==1.8.2
+hpsv2==1.2.0
 # gradio==3.16.2
 # Breaking changes with newer versions
 altair==4.2.2 

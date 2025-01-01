@@ -6946,6 +6946,10 @@ def convert_named_modules_to_fp32(model):
                     return original_forward(*args, **kwargs)
             module.forward = forward_with_fp32
 
+def set_padding_mode_for_conv2d_modules(model: torch.nn.Module, padding_mode: str = 'zeros'):
+    for module in model.modules():
+        if isinstance(module, torch.nn.Conv2d):
+            module.padding_mode = padding_mode
 
 # endregion
 

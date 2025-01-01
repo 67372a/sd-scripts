@@ -940,6 +940,9 @@ class NetworkTrainer:
             # Recast normalization layers and their children back to FP32
             train_util.convert_named_modules_to_fp32(network)
 
+        if args.conv2d_padding_mode is not None and args.conv2d_padding_mode.lower() != 'zeros':
+            train_util.set_padding_mode_for_conv2d_modules(network, args.conv2d_padding_mode)
+
         unet_weight_dtype = te_weight_dtype = weight_dtype
         # Experimental Feature: Put base model into fp8 to save vram
         if args.fp8_base or args.fp8_base_unet:
@@ -2756,6 +2759,14 @@ def setup_parser() -> argparse.ArgumentParser:
         "--stochastic_accumulation",
         action="store_true",
         help="Stochastic accumulation"
+    )
+
+    parser.add_argument(
+        "--conv2d_padding_mode",
+        type=str,
+        default='zeros',
+        choices=["zeros", "reflect", "replicate","circular"],
+        help="Adjusts the padding for edges of Conv2d modules, default is zeros, circular might have benefit, as it pads with the opposite side, tbd."
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
