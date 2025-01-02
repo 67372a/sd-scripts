@@ -199,7 +199,7 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
             redux_encoder = redux_encoder.to(device="cuda")
 
         bsz = txt_ids.shape[0]
-        imgs = [PIL.Image.open(nfo.absolute_path) for nfo in infos]
+        imgs = [PIL.Image.open(nfo.absolute_path).convert("RGB") for nfo in infos]
         siglip_in = siglip_processor(images=imgs, padding="max_length", return_tensors="pt")
         siglip_in = siglip_in.to(dtype=torch.float32, device="cuda")
 
