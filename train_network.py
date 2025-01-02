@@ -114,6 +114,46 @@ def analyze_gradient_norms(parameters):
     
     return stats
 
+@torch.no_grad()
+def analyze_model_norms(unscaled_norms, scaled_norms):
+
+    if not scaled_norms:
+        return {
+                'model/module_norm/mean': 0.0,
+                'model/module_norm/median': 0.0,
+                'model/module_norm/std': 0.0,
+                'model/module_norm/min': 0.0,
+                'model/module_norm/max': 0.0,
+                'model/module_norm/p10': 0.0,
+                'model/module_norm/p25': 0.0,
+                'model/module_norm/p75': 0.0,
+                'model/module_norm/p90': 0.0,
+                'model/module_norm/p95': 0.0,
+                'model/module_norm/p98': 0.0,
+                'model/module_norm/p99': 0.0,
+            }
+    
+    # Convert to numpy array for calculations
+    scaled_norms = np.array(scaled_norms)
+    
+    # Basic statistics
+    stats = {
+        'model/module_norm/mean': float(np.mean(scaled_norms)),
+        'model/module_norm/median': float(np.median(scaled_norms)),
+        'model/module_norm/std': float(np.std(scaled_norms)),
+        'model/module_norm/min': float(np.min(scaled_norms)),
+        'model/module_norm/max': float(np.max(scaled_norms)),
+        'model/module_norm/p10': float(np.percentile(scaled_norms, 10)),  # Lower tail
+        'model/module_norm/p25': float(np.percentile(scaled_norms, 25)),  # First quartile
+        'model/module_norm/p75': float(np.percentile(scaled_norms, 75)),  # Third quartile
+        'model/module_norm/p90': float(np.percentile(scaled_norms, 90)),
+        'model/module_norm/p95': float(np.percentile(scaled_norms, 95)),
+        'model/module_norm/p98': float(np.percentile(scaled_norms, 98)),
+        'model/module_norm/p99': float(np.percentile(scaled_norms, 99)),
+    }
+    
+    return stats
+
 class NetworkTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215
@@ -141,6 +181,7 @@ class NetworkTrainer:
         edm2_grad_norm_clipped=None,
         edm2_lr_scheduler=None,
         gradient_stats=None,
+        network_norm_stats=None,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
 
@@ -167,6 +208,9 @@ class NetworkTrainer:
 
         if gradient_stats:
             logs = {**logs, **gradient_stats}
+
+        if network_norm_stats:
+            logs = {**logs, **network_norm_stats}
 
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
@@ -1535,6 +1579,20 @@ class NetworkTrainer:
                 'train/grad_norm/p98': 0.0,
                 'train/grad_norm/p99': 0.0,
             }
+        network_norm_stats = {
+                'model/module_norm/mean': 0.0,
+                'model/module_norm/median': 0.0,
+                'model/module_norm/std': 0.0,
+                'model/module_norm/min': 0.0,
+                'model/module_norm/max': 0.0,
+                'model/module_norm/p10': 0.0,
+                'model/module_norm/p25': 0.0,
+                'model/module_norm/p75': 0.0,
+                'model/module_norm/p90': 0.0,
+                'model/module_norm/p95': 0.0,
+                'model/module_norm/p98': 0.0,
+                'model/module_norm/p99': 0.0,
+            }
 
         # For --sample_at_first
         if train_util.sample_images_check(args, 0, global_step) or train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
@@ -1844,6 +1902,10 @@ class NetworkTrainer:
                         else:
                             keys_scaled, mean_norm, maximum_norm = None, None, None
 
+                        if hasattr(network, "get_norms"):
+                            unscaled_norms, scaled_norms = accelerator.unwrap_model(network).get_norms(accelerator.device)
+                            network_norm_stats = analyze_model_norms(unscaled_norms, scaled_norms)
+
                         progress_bar.update(1)
                         global_step += 1
 
@@ -1922,7 +1984,7 @@ class NetworkTrainer:
                             args, current_loss, avr_loss, lr_scheduler, lr_descriptions, 
                             optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
                             grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, 
-                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats
+                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats, network_norm_stats
                         )
                         accelerator.log(logs, step=global_step)
                                             
@@ -2164,7 +2226,9 @@ class NetworkTrainer:
                         if args.edm2_loss_weighting:
                             MLP_optim.zero_grad(set_to_none=True)
 
-                    if args.scale_weight_norms:
+                    # Should only scale weight norms AFTER an actual optimizer step, not unaccumulated steps
+                    # thus should check if accelerator.sync_gradients is true
+                    if args.scale_weight_norms and accelerator.sync_gradients:
                         keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
                             args.scale_weight_norms, accelerator.device
                         )
@@ -2184,6 +2248,12 @@ class NetworkTrainer:
                         max_mean_logs = {"Keys Scaled": keys_scaled, "Avg key norm": mean_norm}
                     else:
                         keys_scaled, mean_norm, maximum_norm = None, None, None
+
+                    if accelerator.sync_gradients and hasattr(network, "get_norms"):
+                        unscaled_norms, scaled_norms = accelerator.unwrap_model(network).get_norms(accelerator.device)
+                        network_norm_stats = analyze_model_norms(unscaled_norms, scaled_norms)
+                    else:
+                        network_norm_stats = None
 
                     # Checks if the accelerator has performed an optimization step behind the scenes
                     if accelerator.sync_gradients:
@@ -2286,7 +2356,7 @@ class NetworkTrainer:
                             args, current_loss, avr_loss, lr_scheduler, lr_descriptions, 
                             optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
                             grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, 
-                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats
+                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats, network_norm_stats
                         )
                         accelerator.log(logs, step=global_step)
                                             

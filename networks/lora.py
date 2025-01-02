@@ -1408,3 +1408,6 @@ class LoRANetwork(torch.nn.Module):
             norms.append(scalednorm.item())
 
         return keys_scaled, sum(norms) / len(norms), max(norms)
+
+    def get_norms(self, device):
+        return None, None
