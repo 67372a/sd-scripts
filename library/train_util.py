@@ -44,6 +44,7 @@ from tqdm import tqdm
 from packaging.version import Version
 
 import torch
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from library.device_utils import init_ipex, clean_memory_on_device
 from library.strategy_base import LatentsCachingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy, TextEncodingStrategy
 
@@ -5344,6 +5345,12 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         name = DiffusersSchedulerType(name)
         schedule_func = DIFFUSERS_TYPE_TO_SCHEDULER_FUNCTION[name]
         return schedule_func(optimizer, **lr_scheduler_kwargs)  # step_rules and last_epoch are given as kwargs
+
+    if name.lower() == 'CosineAnnealingLR'.lower():
+        return wrap_check_needless_num_warmup_steps(CosineAnnealingLR(optimizer, 
+                                 T_max=num_training_steps,
+                                 eta_min=lr_scheduler_kwargs.get("min_lr", 1e-8),
+                                 last_epoch=lr_scheduler_kwargs.get("last_epoch", -1)))
 
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
