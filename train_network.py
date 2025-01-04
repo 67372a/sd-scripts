@@ -1565,6 +1565,10 @@ class NetworkTrainer:
         current_val_loss, average_val_loss, val_logs = None, None, {}
         keys_scaled, mean_norm, maximum_norm = None, None, None
         max_mean_logs = {}
+        current_global_step_loss = 0.0
+        current_global_step_loss_scaled = 0.0 if args.edm2_loss_weighting else None
+        average_loss_scaled = 0.0 if args.edm2_loss_weighting else None
+        avr_loss = 0.0
         gradient_stats = {
                 'train/grad_norm/mean': 0.0,
                 'train/grad_norm/median': 0.0,
@@ -1607,8 +1611,29 @@ class NetworkTrainer:
             network.train()
 
         if len(accelerator.trackers) > 0:
-            # log empty object to commit the sample images to wandb
-            accelerator.log({}, step=0)
+            logs = self.generate_step_logs(
+                args=args, 
+                current_loss=current_global_step_loss, 
+                avr_loss=avr_loss, 
+                lr_scheduler=lr_scheduler, 
+                lr_descriptions=lr_descriptions, 
+                optimizer=optimizer, 
+                keys_scaled=keys_scaled, 
+                mean_norm=mean_norm, 
+                maximum_norm=maximum_norm, 
+                grad_norm=grad_norm, 
+                grad_norm_clipped=grad_norm_clipped, 
+                current_val_loss=current_val_loss, 
+                average_val_loss=average_val_loss, 
+                current_loss_scaled=current_global_step_loss_scaled, 
+                average_loss_scaled=average_loss_scaled, 
+                edm2_grad_norm=edm2_grad_norm, 
+                edm2_grad_norm_clipped=edm2_grad_norm_clipped, 
+                edm2_lr_scheduler=mlp_lr_scheduler, 
+                gradient_stats=gradient_stats, 
+                network_norm_stats=network_norm_stats
+            )
+            accelerator.log(logs, step=0)
 
         # training loop
         if initial_step > 0:  # only if skip_until_initial_step is specified
@@ -1823,6 +1848,12 @@ class NetworkTrainer:
 
                         accumulation_counter += 1
 
+                    current_global_step_loss += loss.detach().item() / grad_accum_loss_scaling
+                    if args.edm2_loss_weighting:
+                        current_global_step_loss_scaled += loss_scaled.detach().item() / grad_accum_loss_scaling
+                    else:
+                        current_global_step_loss_scaled = None
+
                     if sync_gradients:
                         #logger.info("Sync gradients. accumulation_counter=%s, global_step=%s, epoch=%s, epoch_step=%s", 
                         #            accumulation_counter, global_step + 1, epoch, step)
@@ -1877,9 +1908,6 @@ class NetworkTrainer:
 
                         if args.edm2_loss_weighting and mlp_lr_scheduler is not None:
                             mlp_lr_scheduler.step()
-
-                        # Reset accumulation counter
-                        accumulation_counter = 0
 
                         if args.scale_weight_norms:
                             keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
@@ -1952,42 +1980,40 @@ class NetworkTrainer:
                         else:
                             current_val_loss, average_val_loss, val_logs = None, None, None
 
-                    current_loss = loss.detach().item() / grad_accum_loss_scaling  # Multiply back since we divided earlier
-                    loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-                    if args.edm2_loss_weighting:
-                        current_loss_scaled = loss_scaled.detach().item() / grad_accum_loss_scaling
-                        loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
-                        average_loss_scaled: float = loss_scaled_recorder.moving_average
-                    else:
-                        current_loss_scaled = None
-                        average_loss_scaled = None
+                        loss_recorder.add(epoch=epoch, step=global_step, loss=current_global_step_loss / accumulation_counter)
+                        if args.edm2_loss_weighting:
+                            loss_scaled_recorder.add(epoch=epoch, step=global_step, loss=current_global_step_loss_scaled / accumulation_counter)
 
-                    avr_loss: float = loss_recorder.moving_average
-                    logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                        avr_loss: float = loss_recorder.moving_average if global_step > 0 else 0.0
+                        logs = {"avg_loss": avr_loss}
 
-                    if args.scale_weight_norms:
-                        logs = {**max_mean_logs, **logs}
+                        if args.scale_weight_norms:
+                            logs = {**max_mean_logs, **logs}
 
-                    progress_bar.set_postfix(**logs)
+                        progress_bar.set_postfix(**logs)
 
-                    if args.edm2_loss_weighting:
-                        logs = {"avg_loss_scaled": average_loss_scaled, **logs}
+                        if len(accelerator.trackers) > 0:
+                            current_global_step_loss = (current_global_step_loss / accumulation_counter)
+                            if args.edm2_loss_weighting:
+                                current_global_step_loss_scaled = (current_global_step_loss_scaled / accumulation_counter)
+                                average_loss_scaled: float = loss_scaled_recorder.moving_average
+                            else:
+                                current_global_step_loss_scaled = None
+                                average_loss_scaled = None
+                            logs = self.generate_step_logs(
+                                args, current_global_step_loss, avr_loss, lr_scheduler, lr_descriptions, 
+                                optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
+                                grad_norm_clipped, current_val_loss, average_val_loss, current_global_step_loss_scaled, 
+                                average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats, network_norm_stats
+                            )
+                            accelerator.log(logs, step=global_step)
+                            current_global_step_loss = 0.0
+                            if args.edm2_loss_weighting:
+                                current_global_step_loss_scaled = 0.0
 
-                    if val_logs:
-                        logs = {**val_logs, **logs}
+                        # Reset accumulation counter
+                        accumulation_counter = 0
 
-                    if args.max_grad_norm != 0.0:
-                        logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
-
-                    if len(accelerator.trackers) > 0:
-                        logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, 
-                            optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
-                            grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, 
-                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats, network_norm_stats
-                        )
-                        accelerator.log(logs, step=global_step)
-                                            
                     if global_step >= args.max_train_steps:
                         break
 
@@ -2056,6 +2082,8 @@ class NetworkTrainer:
 
                     with accelerator.accumulate(training_model, lossweightMLP) if args.edm2_loss_weighting else accelerator.accumulate(training_model):
                         on_step_start_for_network(text_encoder, unet)
+
+                        accumulation_counter += 1
 
                         # temporary, for batch processing
                         self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
@@ -2324,41 +2352,46 @@ class NetworkTrainer:
                         else:
                             current_val_loss, average_val_loss, val_logs = None, None, None
 
-                    current_loss = loss.detach().item()
-                    loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    
+                    current_global_step_loss += loss.detach().item()
                     if args.edm2_loss_weighting:
-                        current_loss_scaled = loss_scaled.detach().item()
-                        loss_scaled_recorder.add(epoch=epoch, step=step, loss=current_loss_scaled)
-                        average_loss_scaled: float = loss_scaled_recorder.moving_average
+                        current_global_step_loss_scaled += loss_scaled.detach().item()
                     else:
-                        current_loss_scaled = None
-                        average_loss_scaled = None
+                        current_global_step_loss_scaled = None
 
-                    avr_loss: float = loss_recorder.moving_average
-                    logs = {"avg_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                    if accelerator.sync_gradients:
+                        loss_recorder.add(epoch=epoch, step=global_step, loss=current_global_step_loss / accumulation_counter)
+                        if args.edm2_loss_weighting:
+                            loss_scaled_recorder.add(epoch=epoch, step=global_step, loss=current_global_step_loss_scaled / accumulation_counter)
 
-                    if args.scale_weight_norms:
-                        logs = {**max_mean_logs, **logs}
+                        avr_loss: float = loss_recorder.moving_average if global_step > 0 else 0.0
+                        logs = {"avg_loss": avr_loss}
 
-                    progress_bar.set_postfix(**logs)
+                        if args.scale_weight_norms:
+                            logs = {**max_mean_logs, **logs}
 
-                    if args.edm2_loss_weighting:
-                        logs = {"avg_loss_scaled": average_loss_scaled, **logs}
+                        progress_bar.set_postfix(**logs)
 
-                    if val_logs:
-                        logs = {**val_logs, **logs}
+                        if len(accelerator.trackers) > 0:
+                            current_global_step_loss = (current_global_step_loss / accumulation_counter)
+                            if args.edm2_loss_weighting:
+                                current_global_step_loss_scaled = (current_global_step_loss_scaled / accumulation_counter)
+                                average_loss_scaled: float = loss_scaled_recorder.moving_average
+                            else:
+                                current_global_step_loss_scaled = None
+                                average_loss_scaled = None
+                            logs = self.generate_step_logs(
+                                args, current_global_step_loss, avr_loss, lr_scheduler, lr_descriptions, 
+                                optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
+                                grad_norm_clipped, current_val_loss, average_val_loss, current_global_step_loss_scaled, 
+                                average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats, network_norm_stats
+                            )
+                            accelerator.log(logs, step=global_step)
+                            current_global_step_loss = 0.0
+                            if args.edm2_loss_weighting:
+                                current_global_step_loss_scaled = 0.0
 
-                    if args.max_grad_norm != 0.0:
-                        logs = {'Grad Norm': grad_norm, 'Grad Norm Clipped': grad_norm_clipped, **logs}
-
-                    if len(accelerator.trackers) > 0:
-                        logs = self.generate_step_logs(
-                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, 
-                            optimizer, keys_scaled, mean_norm, maximum_norm, grad_norm, 
-                            grad_norm_clipped, current_val_loss, average_val_loss, current_loss_scaled, 
-                            average_loss_scaled, edm2_grad_norm, edm2_grad_norm_clipped, mlp_lr_scheduler, gradient_stats, network_norm_stats
-                        )
-                        accelerator.log(logs, step=global_step)
+                            accumulation_counter = 0
                                             
                     if global_step >= args.max_train_steps:
                         break
