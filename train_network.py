@@ -91,6 +91,9 @@ def analyze_gradient_norms(parameters):
                 'train/grad_norm/p95': 0.0,
                 'train/grad_norm/p98': 0.0,
                 'train/grad_norm/p99': 0.0,
+                'train/grad_norm/p995': 0.0,
+                'train/grad_norm/p998': 0.0,
+                'train/grad_norm/p999': 0.0,
             }
     
     # Convert to numpy array for calculations
@@ -110,6 +113,9 @@ def analyze_gradient_norms(parameters):
         'train/grad_norm/p95': float(np.percentile(grad_norms, 95)),
         'train/grad_norm/p98': float(np.percentile(grad_norms, 98)),
         'train/grad_norm/p99': float(np.percentile(grad_norms, 99)),
+        'train/grad_norm/p995': float(np.percentile(grad_norms, 99.5)),
+        'train/grad_norm/p998': float(np.percentile(grad_norms, 99.8)),
+        'train/grad_norm/p999': float(np.percentile(grad_norms, 99.9)),
     }
     
     return stats
@@ -117,7 +123,7 @@ def analyze_gradient_norms(parameters):
 @torch.no_grad()
 def analyze_model_norms(unscaled_norms, scaled_norms):
 
-    if not scaled_norms:
+    if not scaled_norms or not unscaled_norms:
         return {
                 'model/module_norm/mean': 0.0,
                 'model/module_norm/median': 0.0,
@@ -131,9 +137,28 @@ def analyze_model_norms(unscaled_norms, scaled_norms):
                 'model/module_norm/p95': 0.0,
                 'model/module_norm/p98': 0.0,
                 'model/module_norm/p99': 0.0,
+                'model/module_norm/p995': 0.0,
+                'model/module_norm/p998': 0.0,
+                'model/module_norm/p999': 0.0,
+                'model/module_norm/unscaled/mean': 0.0,
+                'model/module_norm/unscaled/median': 0.0,
+                'model/module_norm/unscaled/std': 0.0,
+                'model/module_norm/unscaled/min': 0.0,
+                'model/module_norm/unscaled/max': 0.0,
+                'model/module_norm/unscaled/p10': 0.0,
+                'model/module_norm/unscaled/p25': 0.0,
+                'model/module_norm/unscaled/p75': 0.0,
+                'model/module_norm/unscaled/p90': 0.0,
+                'model/module_norm/unscaled/p95': 0.0,
+                'model/module_norm/unscaled/p98': 0.0,
+                'model/module_norm/unscaled/p99': 0.0,
+                'model/module_norm/unscaled/p995': 0.0,
+                'model/module_norm/unscaled/p998': 0.0,
+                'model/module_norm/unscaled/p999': 0.0,
             }
     
     # Convert to numpy array for calculations
+    unscaled_norms = np.array(unscaled_norms)
     scaled_norms = np.array(scaled_norms)
     
     # Basic statistics
@@ -150,6 +175,24 @@ def analyze_model_norms(unscaled_norms, scaled_norms):
         'model/module_norm/p95': float(np.percentile(scaled_norms, 95)),
         'model/module_norm/p98': float(np.percentile(scaled_norms, 98)),
         'model/module_norm/p99': float(np.percentile(scaled_norms, 99)),
+        'model/module_norm/p995': float(np.percentile(scaled_norms, 99.5)),
+        'model/module_norm/p998': float(np.percentile(scaled_norms, 99.8)),
+        'model/module_norm/p999': float(np.percentile(scaled_norms, 99.9)),
+        'model/module_norm/unscaled/mean': float(np.mean(unscaled_norms)),
+        'model/module_norm/unscaled/median': float(np.median(unscaled_norms)),
+        'model/module_norm/unscaled/std': float(np.std(unscaled_norms)),
+        'model/module_norm/unscaled/min': float(np.min(unscaled_norms)),
+        'model/module_norm/unscaled/max': float(np.max(unscaled_norms)),
+        'model/module_norm/unscaled/p10': float(np.percentile(unscaled_norms, 10)),  # Lower tail
+        'model/module_norm/unscaled/p25': float(np.percentile(unscaled_norms, 25)),  # First quartile
+        'model/module_norm/unscaled/p75': float(np.percentile(unscaled_norms, 75)),  # Third quartile
+        'model/module_norm/unscaled/p90': float(np.percentile(unscaled_norms, 90)),
+        'model/module_norm/unscaled/p95': float(np.percentile(unscaled_norms, 95)),
+        'model/module_norm/unscaled/p98': float(np.percentile(unscaled_norms, 98)),
+        'model/module_norm/unscaled/p99': float(np.percentile(unscaled_norms, 99)),
+        'model/module_norm/unscaled/p995': float(np.percentile(unscaled_norms, 99.5)),
+        'model/module_norm/unscaled/p998': float(np.percentile(unscaled_norms, 99.8)),
+        'model/module_norm/unscaled/p999': float(np.percentile(unscaled_norms, 99.9)),
     }
     
     return stats
@@ -1582,6 +1625,9 @@ class NetworkTrainer:
                 'train/grad_norm/p95': 0.0,
                 'train/grad_norm/p98': 0.0,
                 'train/grad_norm/p99': 0.0,
+                'train/grad_norm/p995': 0.0,
+                'train/grad_norm/p998': 0.0,
+                'train/grad_norm/p999': 0.0,
             }
         network_norm_stats = {
                 'model/module_norm/mean': 0.0,
@@ -1596,6 +1642,24 @@ class NetworkTrainer:
                 'model/module_norm/p95': 0.0,
                 'model/module_norm/p98': 0.0,
                 'model/module_norm/p99': 0.0,
+                'model/module_norm/p995': 0.0,
+                'model/module_norm/p998': 0.0,
+                'model/module_norm/p999': 0.0,
+                'model/module_norm/unscaled/mean': 0.0,
+                'model/module_norm/unscaled/median': 0.0,
+                'model/module_norm/unscaled/std': 0.0,
+                'model/module_norm/unscaled/min': 0.0,
+                'model/module_norm/unscaled/max': 0.0,
+                'model/module_norm/unscaled/p10': 0.0,
+                'model/module_norm/unscaled/p25': 0.0,
+                'model/module_norm/unscaled/p75': 0.0,
+                'model/module_norm/unscaled/p90': 0.0,
+                'model/module_norm/unscaled/p95': 0.0,
+                'model/module_norm/unscaled/p98': 0.0,
+                'model/module_norm/unscaled/p99': 0.0,
+                'model/module_norm/unscaled/p995': 0.0,
+                'model/module_norm/unscaled/p998': 0.0,
+                'model/module_norm/unscaled/p999': 0.0,
             }
 
         # For --sample_at_first
