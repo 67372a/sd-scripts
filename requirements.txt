@@ -14,8 +14,8 @@ tensorboard==2.18.0
 safetensors==0.5.0
 hpsv2==1.2.0
 # gradio==3.16.2
-# Breaking changes with newer versions
-altair==4.2.2 
+altair==5.5.0
+narwhals==1.21.0
 easygui==0.98.3
 toml==0.10.2
 voluptuous==0.15.2

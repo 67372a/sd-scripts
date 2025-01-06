@@ -6939,6 +6939,7 @@ def plot_dynamic_loss_weighting(args, step: int, model, num_timesteps: int = 100
         plt.close()
 
 def convert_named_modules_to_fp32(model):
+    logger.info(f"Converting all norm modules to FP32")
     for name, module in model.named_modules():
         if 'norm' in name.lower() or isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d, 
                                                          torch.nn.LazyBatchNorm1d, torch.nn.LazyBatchNorm2d, torch.nn.LazyBatchNorm3d, 
@@ -6946,7 +6947,6 @@ def convert_named_modules_to_fp32(model):
                                                          torch.nn.InstanceNorm1d, torch.nn.InstanceNorm2d, torch.nn.InstanceNorm3d, 
                                                          torch.nn.LazyInstanceNorm1d, torch.nn.LazyInstanceNorm2d, torch.nn.LazyInstanceNorm3d,
                                                          torch.nn.LayerNorm, torch.nn.LocalResponseNorm, torch.nn.RMSNorm)):
-            logger.info(f"Converting all norm modules to FP32")
 
             # Convert module to fp32 inplace
             module.float() 
