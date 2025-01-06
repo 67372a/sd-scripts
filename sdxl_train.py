@@ -114,9 +114,10 @@ def determine_grad_sync_context(accelerator, sync_gradients, training_models, lo
     else:
         return contextlib.nullcontext()
 
-def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args):
-    total_loss = 0.0
-    timesteps_list = [10, 350, 500, 650, 990]    
+def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, 
+                      unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, 
+                      timesteps_list: list = [10, 350, 500, 650, 990]):
+    total_loss = 0.0  
     with torch.autograd.grad_mode.inference_mode(mode=True):
         if "latents" in batch and batch["latents"] is not None:
             latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
@@ -231,6 +232,8 @@ def calculate_val_loss(self,
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(val_Seed)
 
+    timesteps_list = ast.literal_eval(args.validation_timesteps)
+
     accelerator.print("")
     accelerator.print("Validating バリデーション処理...")
     total_loss = 0.0
@@ -244,7 +247,8 @@ def calculate_val_loss(self,
             batch = next(cyclic_val_dataloader)
             val_dataloader_state = random.getstate()
             random.setstate(val_original_state)
-            loss = self.process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+            loss = self.process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, text_encoding_strategy, 
+                                          unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, timesteps_list=timesteps_list)
             total_loss += loss.detach().item()
         current_val_loss = total_loss / validation_steps
         val_loss_recorder.add(epoch=0, step=global_step, loss=current_val_loss)   
@@ -1676,8 +1680,14 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Number of max validation steps for counting validation loss. By default, validation will run entire validation dataset"
-    )    
+    )
 
+    parser.add_argument(
+        "--validation_timesteps",
+        type=str,
+        default=r"[10, 350, 500, 650, 990]",
+        help="A list of timesteps to use for each validation step."
+    )  
     parser.add_argument(
         "--disable_cuda_reduced_precision_operations",
         action="store_true",

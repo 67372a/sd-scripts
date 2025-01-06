@@ -514,9 +514,10 @@ class NetworkTrainer:
     def plot_dynamic_loss_weighting_check(self, args, global_step):
         return args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps)
 
-    def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
-        total_loss = 0.0
-        timesteps_list = [10, 350, 500, 650, 990]    
+    def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, 
+                          text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, 
+                          accelerator, args, timesteps_list: list = [10, 350, 500, 650, 990], train_text_encoder: bool = True):
+        total_loss = 0.0 
         with torch.autograd.grad_mode.inference_mode(mode=True):
             if "latents" in batch and batch["latents"] is not None:
                 latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
@@ -658,6 +659,8 @@ class NetworkTrainer:
         torch.manual_seed(val_Seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(val_Seed)
+
+        timesteps_list = ast.literal_eval(args.validation_timesteps)
               
         accelerator.print("") 
         accelerator.print("Validating バリデーション処理...")
@@ -672,7 +675,10 @@ class NetworkTrainer:
                 batch = next(cyclic_val_dataloader)
                 val_dataloader_state = random.getstate()
                 random.setstate(val_original_state)
-                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, 
+                                              text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, 
+                                              weight_dtype, accelerator, args, timesteps_list=timesteps_list, 
+                                              train_text_encoder=train_text_encoder)
                 total_loss += loss.detach().item()
             current_val_loss = total_loss / validation_steps
             val_loss_recorder.add(epoch=0, step=global_step, loss=current_val_loss)   
@@ -2656,6 +2662,14 @@ def setup_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of train steps for counting validation loss. By default, validation per train epoch is performed"
     )    
+
+    parser.add_argument(
+        "--validation_timesteps",
+        type=str,
+        default=r"[10, 350, 500, 650, 990]",
+        help="A list of timesteps to use for each validation step."
+    )  
+
     parser.add_argument(
         "--max_validation_steps",
         type=int,
