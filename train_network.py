@@ -1752,6 +1752,9 @@ class NetworkTrainer:
                 logger.warning("Min snr gamma and sangoi loss modification both limit the max snr, ignoring min snr gamma in favor of sangoi.")
 
         if args.full_bf16:
+            # apply stochastic grad accumulator hooks
+            stochastic_accumulator.StochasticAccumulator.assign_hooks(network)
+
             for epoch in range(epoch_to_start, num_train_epochs):
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
                 current_epoch.value = epoch + 1
@@ -1759,9 +1762,6 @@ class NetworkTrainer:
                 metadata["ss_epoch"] = str(epoch + 1)
 
                 accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
-
-                # apply stochastic grad accumulator hooks
-                stochastic_accumulator.StochasticAccumulator.assign_hooks(network)
 
                 skipped_dataloader = None
                 if initial_step > 0:

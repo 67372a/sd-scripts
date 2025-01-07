@@ -915,6 +915,10 @@ def train(args):
         if args.stochastic_accumulation:
             if not args.full_bf16:
                 logger.warning("""Stochastic accumulation is only applied if using full_bf16. Stochastic accumulation doesn't support fp16, while in mixed precision gradients are fp32.""")
+            else:
+                for m in training_models:
+                    # apply stochastic grad accumulator hooks
+                    stochastic_accumulator.StochasticAccumulator.assign_hooks(m)
 
     # Define the number of steps to accumulate gradients
     iter_size = args.gradient_accumulation_steps
@@ -926,9 +930,6 @@ def train(args):
 
         for m in training_models:
             m.train()
-            if args.stochastic_accumulation and args.full_bf16:
-                # apply stochastic grad accumulator hooks
-                stochastic_accumulator.StochasticAccumulator.assign_hooks(m)
 
         if args.stochastic_accumulation and args.full_bf16:
             for step, batch in enumerate(train_dataloader):
