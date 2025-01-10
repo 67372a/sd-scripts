@@ -11,7 +11,7 @@ prodigyopt==1.1.1
 lion-pytorch==0.2.3
 schedulefree==1.4
 tensorboard==2.18.0
-safetensors==0.5.1
+safetensors==0.5.2
 hpsv2==1.2.0
 # gradio==3.16.2
 altair==5.5.0
