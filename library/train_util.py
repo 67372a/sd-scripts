@@ -6906,7 +6906,7 @@ def plot_dynamic_loss_weighting(args, step: int, model, num_timesteps: int = 100
     """
     with torch.inference_mode():
         # Generate a range of timesteps
-        timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to(device).int()
+        timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to("cpu").int()
 
         model.train(False)
         loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)
