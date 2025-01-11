@@ -454,9 +454,9 @@ class DyLoRANetwork(torch.nn.Module):
 
                 if lr is not None:
                     if key == "plus":
-                        param_data["lr"] = lr * ratio
+                        param_data["lr"] = torch.tensor(lr * ratio)
                     else:
-                        param_data["lr"] = lr
+                        param_data["lr"] = torch.tensor(lr)
 
                 if param_data.get("lr", None) == 0 or param_data.get("lr", None) is None:
                     continue
@@ -475,7 +475,8 @@ class DyLoRANetwork(torch.nn.Module):
 
         if self.unet_loras:
             params = assemble_params(
-                self.unet_loras, default_lr if unet_lr is None else unet_lr, self.loraplus_unet_lr_ratio or self.loraplus_lr_ratio
+                self.unet_loras, default_lr if unet_lr is None else unet_lr, 
+                self.loraplus_unet_lr_ratio or self.loraplus_lr_ratio
             )
             all_params.extend(params)
 

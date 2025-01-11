@@ -1180,9 +1180,9 @@ class LoRANetwork(torch.nn.Module):
 
                 if lr is not None:
                     if key == "plus":
-                        param_data["lr"] = lr * ratio
+                        param_data["lr"] = torch.tensor(lr * ratio)
                     else:
-                        param_data["lr"] = lr
+                        param_data["lr"] = torch.tensor(lr)
 
                 if param_data.get("lr", None) == 0 or param_data.get("lr", None) is None:
                     logger.info("NO LR skipping!")

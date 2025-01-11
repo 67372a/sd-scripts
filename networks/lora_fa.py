@@ -1047,7 +1047,7 @@ class LoRANetwork(torch.nn.Module):
         if self.text_encoder_loras:
             param_data = {"params": enumerate_params(self.text_encoder_loras)}
             if text_encoder_lr is not None:
-                param_data["lr"] = text_encoder_lr
+                param_data["lr"] = torch.tensor(text_encoder_lr)
             all_params.append(param_data)
 
         if self.unet_loras:
@@ -1065,9 +1065,9 @@ class LoRANetwork(torch.nn.Module):
                     param_data = {"params": enumerate_params(block_loras)}
 
                     if unet_lr is not None:
-                        param_data["lr"] = unet_lr * self.get_lr_weight(block_loras[0])
+                        param_data["lr"] = torch.tensor(unet_lr * self.get_lr_weight(block_loras[0]))
                     elif default_lr is not None:
-                        param_data["lr"] = default_lr * self.get_lr_weight(block_loras[0])
+                        param_data["lr"] = torch.tensor(default_lr * self.get_lr_weight(block_loras[0]))
                     if ("lr" in param_data) and (param_data["lr"] == 0):
                         continue
                     all_params.append(param_data)
@@ -1075,7 +1075,7 @@ class LoRANetwork(torch.nn.Module):
             else:
                 param_data = {"params": enumerate_params(self.unet_loras)}
                 if unet_lr is not None:
-                    param_data["lr"] = unet_lr
+                    param_data["lr"] = torch.tensor(unet_lr)
                 all_params.append(param_data)
 
         return all_params

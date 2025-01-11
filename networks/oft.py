@@ -376,7 +376,7 @@ class OFTNetwork(torch.nn.Module):
 
         param_data = {"params": enumerate_params(self.unet_ofts)}
         if unet_lr is not None:
-            param_data["lr"] = unet_lr
+            param_data["lr"] = torch.tensor(unet_lr)
         all_params.append(param_data)
 
         return all_params
