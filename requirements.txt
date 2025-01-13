@@ -15,13 +15,13 @@ safetensors==0.5.2
 hpsv2==1.2.0
 # gradio==3.16.2
 altair==5.5.0
-narwhals==1.21.1
+narwhals==1.22.0
 easygui==0.98.3
 toml==0.10.2
 voluptuous==0.15.2
 huggingface-hub==0.27.1
 matplotlib==3.10.0
-scipy==1.15.0
+scipy==1.15.1
 # for Image utils
 imagesize==1.4.1
 # for BLIP captioning
