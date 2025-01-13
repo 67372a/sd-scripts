@@ -55,7 +55,7 @@ class AdaptiveLossWeightMLP(nn.Module):
             dtype=torch.float32,
         ):
         super().__init__()
-        self.alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=device)
+        self.alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=device, dtype=dtype)
         #self.a_bar_mean = noise_scheduler.alphas_cumprod.mean()
         #self.a_bar_std = noise_scheduler.alphas_cumprod.std()
         self.a_bar_mean = self.alphas_cumprod.mean()
@@ -64,6 +64,7 @@ class AdaptiveLossWeightMLP(nn.Module):
         self.logvar_linear = NormalizedLinearLayer(logvar_channels, 1, kernel=[], dtype=dtype) # kernel = []? (not in code given, added matching edm2)
         self.lambda_weights = lambda_weights.to(device=device, dtype=dtype) if lambda_weights is not None else torch.ones(1000, device=device)
         self.noise_scheduler = noise_scheduler
+        self.dtype=dtype
 
     def _forward(self, timesteps: torch.Tensor):
         #a_bar = self.noise_scheduler.alphas_cumprod[timesteps]
