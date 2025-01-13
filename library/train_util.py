@@ -6443,9 +6443,6 @@ def calculate_val_loss_check(args, global_step, epoch_step, val_dataloader, trai
 
 # Inspired by Grokking at the Edge of Numerical Stability (https://arxiv.org/abs/2501.04697)
 def stable_mse_loss(predictions, targets, reduction="mean", epsilon=1e-36):
-    # Convert to torch.float64 if not already
-    predictions = predictions.to(torch.float64)
-    targets = targets.to(torch.float64)
     differences = predictions - targets
     squared_differences = torch.clamp(differences ** 2, min=epsilon)
     if reduction == "mean":

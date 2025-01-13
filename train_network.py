@@ -409,6 +409,10 @@ class NetworkTrainer:
         fixed_timesteps=None,
         train=True
     ):
+        if args.loss_related_use_float64:
+            # Convert to float64, noise and noisy latents will be float64 due to using like on latents
+            latents = latents.to(torch.float64)
+
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
         noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_timesteps, train)
@@ -433,11 +437,17 @@ class NetworkTrainer:
                 weight_dtype,
             )
 
+        if args.loss_related_use_float64:
+            noise_pred = noise_pred.to(torch.float64)
+
         if args.v_parameterization:
             # v-parameterization training
             target = noise_scheduler.get_velocity(latents, noise, timesteps)
         else:
             target = noise
+
+        if args.loss_related_use_float64:
+            target = target.to(torch.float64)
 
         # differential output preservation
         if "custom_attributes" in batch:
@@ -601,9 +611,6 @@ class NetworkTrainer:
                         timesteps,
                         False,
                     )
-
-                    noise_pred = noise_pred.to(torch.float64)
-                    target = target.to(torch.float64)
 
                     # Compute loss
                     loss = train_util.conditional_loss(noise_pred, target, "l2", "none", None)
@@ -1498,8 +1505,6 @@ class NetworkTrainer:
 
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
 
-
-
         if args.edm2_loss_weighting:
             values = args.edm2_loss_weighting_optimizer.split(".")
             optimizer_module = importlib.import_module(".".join(values[:-1]))
@@ -1512,7 +1517,8 @@ class NetworkTrainer:
                                                                       optimizer=getattr(optimizer_module, case_sensitive_optimizer_type),
                                                                       lr=opti_lr,
                                                                       optimizer_args=opti_args,
-                                                                      device=accelerator.device)
+                                                                      device=accelerator.device,
+                                                                      dtype=torch.float64 if args.edm2_loss_weighting_use_float64 else torch.float32)
             if args.edm2_loss_weighting_initial_weights:
                 lossweightMLP.load_weights(args.edm2_loss_weighting_initial_weights)
 
@@ -1863,9 +1869,6 @@ class NetworkTrainer:
                             train_unet,
                         )
 
-                        noise_pred = noise_pred.to(torch.float64)
-                        target = target.to(torch.float64)
-
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
@@ -2029,7 +2032,7 @@ class NetworkTrainer:
 
                                     if args.edm2_loss_weighting:
                                         loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
-                                        save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
+                                        save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float64)
 
                                     if args.save_state:
                                         train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
@@ -2105,7 +2108,7 @@ class NetworkTrainer:
 
                             if args.edm2_loss_weighting:
                                 loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                                save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
+                                save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float64)
 
                             remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
                             if remove_epoch_no is not None:
@@ -2231,9 +2234,6 @@ class NetworkTrainer:
                             weight_dtype,
                             train_unet,
                         )
-
-                        noise_pred = noise_pred.to(torch.float64)
-                        target = target.to(torch.float64)
 
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
@@ -2403,7 +2403,7 @@ class NetworkTrainer:
 
                                     if args.edm2_loss_weighting:
                                         loss_weights_ckpt_name = train_util.get_step_loss_weights_ckpt_name(args, "." + args.save_model_as, global_step)
-                                        save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float32)
+                                        save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch, dtype_override=torch.float64)
 
                                     if args.save_state:
                                         train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
@@ -2488,7 +2488,7 @@ class NetworkTrainer:
 
                             if args.edm2_loss_weighting:
                                 loss_weights_ckpt_name = train_util.get_epoch_loss_weights_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                                save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float32)
+                                save_model(loss_weights_ckpt_name, accelerator.unwrap_model(lossweightMLP), global_step, epoch + 1, dtype_override=torch.float64)
 
                             remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
                             if remove_epoch_no is not None:
@@ -2529,7 +2529,7 @@ class NetworkTrainer:
 
             if args.edm2_loss_weighting:
                 loss_weights_ckpt_name = train_util.get_last_loss_weights_ckpt_name(args, "." + args.save_model_as)
-                save_model(loss_weights_ckpt_name, lossweightMLP, global_step, num_train_epochs, force_sync_upload=True, dtype_override=torch.float32)
+                save_model(loss_weights_ckpt_name, lossweightMLP, global_step, num_train_epochs, force_sync_upload=True, dtype_override=torch.float64)
 
             logger.info("model saved.")
 
@@ -2965,6 +2965,18 @@ def setup_parser() -> argparse.ArgumentParser:
         default='zeros',
         choices=["zeros", "reflect", "replicate","circular"],
         help="Adjusts the padding for edges of Conv2d modules, default is zeros, circular might have benefit, as it pads with the opposite side, tbd."
+    )
+
+    parser.add_argument(
+        "--loss_related_use_float64",
+        action="store_true",
+        help="Upcasts targets, noise, noisy latents, latents, and loss during loss and noise calculations to float64 for greater precision. Slight compute and vram overhead."
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_use_float64",
+        action="store_true",
+        help="Uses float64 for edm2 loss weighting."
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
