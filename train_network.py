@@ -1126,11 +1126,11 @@ class NetworkTrainer:
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required
             unet.train()
-            for i, (t_enc, frag) in enumerate(zip(text_encoders, self.get_text_encoders_train_flags(args, text_encoders))):
+            for i, (t_enc, flag) in enumerate(zip(text_encoders, self.get_text_encoders_train_flags(args, text_encoders))):
                 t_enc.train()
 
                 # set top parameter requires_grad = True for gradient checkpointing works
-                if frag:
+                if flag:
                     self.prepare_text_encoder_grad_ckpt_workaround(i, t_enc)
 
         else:
