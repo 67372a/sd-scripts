@@ -563,14 +563,12 @@ class NetworkTrainer:
                 with accelerator.autocast():
                     # Get the text embedding for conditioning
                     if args.weighted_captions:
-                        # SD only
-                        encoded_text_encoder_conds = get_weighted_text_embeddings(
-                            tokenizers[0],
-                            text_encoders[0],
-                            batch["captions"],
-                            accelerator.device,
-                            args.max_token_length // 75 if args.max_token_length else 1,
-                            clip_skip=args.clip_skip,
+                        input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
+                        encoded_text_encoder_conds = text_encoding_strategy.encode_tokens_with_weights(
+                            tokenize_strategy,
+                            self.get_models_for_text_encoding(args, accelerator, text_encoders),
+                            input_ids_list,
+                            weights_list,
                         )
                     else:
                         input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
@@ -2977,6 +2975,18 @@ def setup_parser() -> argparse.ArgumentParser:
         "--edm2_loss_weighting_use_float64",
         action="store_true",
         help="Uses float64 for edm2 loss weighting."
+    )
+
+    parser.add_argument(
+        "--disable_training_clip_l",
+        action="store_true",
+        help="Disable training clip l (first te), only effective if training TEs."
+    )
+
+    parser.add_argument(
+        "--disable_training_clip_g",
+        action="store_true",
+        help="Disable training clip g (second te), only effective if training TEs."
     )
 
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")

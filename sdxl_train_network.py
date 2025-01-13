@@ -38,6 +38,15 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
 
         train_dataset_group.verify_bucket_reso_steps(32)
 
+        # prepare CLIP-L/clip-g training flags
+        self.train_clip_l = not args.disable_training_clip_l
+        self.train_clip_g = not args.disable_training_clip_g
+
+        if not self.train_clip_l:
+            logger.info("Disabling training of clip l")
+        if not self.train_clip_g:
+            logger.info("Disabling training of clip g")
+
     def load_target_model(self, args, weight_dtype, accelerator):
         (
             load_stable_diffusion_format,
@@ -74,6 +83,9 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
 
     def get_text_encoding_strategy(self, args):
         return strategy_sdxl.SdxlTextEncodingStrategy()
+    
+    def is_text_encoder_not_needed_for_training(self, args):
+        return args.cache_text_encoder_outputs and not self.is_train_text_encoder(args)
 
     def get_models_for_text_encoding(self, args, accelerator, text_encoders):
         return text_encoders + [accelerator.unwrap_model(text_encoders[-1])]
@@ -209,6 +221,9 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
 
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
         sdxl_train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
+
+    def get_text_encoders_train_flags(self, args, text_encoders):
+        return [self.train_clip_l, self.train_clip_g]
 
 
 def setup_parser() -> argparse.ArgumentParser:
