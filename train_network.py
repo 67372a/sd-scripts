@@ -602,8 +602,11 @@ class NetworkTrainer:
                         False,
                     )
 
+                    noise_pred = noise_pred.to(torch.float64)
+                    target = target.to(torch.float64)
+
                     # Compute loss
-                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), "l2", "none", None)
+                    loss = train_util.conditional_loss(noise_pred, target, "l2", "none", None)
 
                     #if weighting is not None:
                     #    loss = loss * weighting
@@ -1860,10 +1863,13 @@ class NetworkTrainer:
                             train_unet,
                         )
 
+                        noise_pred = noise_pred.to(torch.float64)
+                        target = target.to(torch.float64)
+
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
-                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
+                        loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma)
                         if weighting is not None:
                             loss = loss * weighting
                         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -1881,8 +1887,8 @@ class NetworkTrainer:
                                 min_snr = float(args.sangoi_loss_modifier_min_snr)
 
                             loss = loss * train_util.sangoi_loss_modifier(timesteps, 
-                                                                    noise_pred.float(), 
-                                                                    target.float(), 
+                                                                    noise_pred, 
+                                                                    target, 
                                                                     noise_scheduler,
                                                                     min_snr,
                                                                     float(args.sangoi_loss_modifier_max_snr))
@@ -2226,10 +2232,13 @@ class NetworkTrainer:
                             train_unet,
                         )
 
+                        noise_pred = noise_pred.to(torch.float64)
+                        target = target.to(torch.float64)
+
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
-                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "none", huber_c, gamma)
+                        loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma)
 
                         if weighting is not None:
                             loss = loss * weighting
@@ -2248,8 +2257,8 @@ class NetworkTrainer:
                                 min_snr = float(args.sangoi_loss_modifier_min_snr)
 
                             loss = loss * train_util.sangoi_loss_modifier(timesteps, 
-                                                                    noise_pred.float(), 
-                                                                    target.float(), 
+                                                                    noise_pred, 
+                                                                    target, 
                                                                     noise_scheduler,
                                                                     min_snr,
                                                                     float(args.sangoi_loss_modifier_max_snr))

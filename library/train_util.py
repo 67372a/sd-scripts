@@ -6441,18 +6441,35 @@ def calculate_val_loss_check(args, global_step, epoch_step, val_dataloader, trai
                 return False
     return True
 
+# Inspired by Grokking at the Edge of Numerical Stability (https://arxiv.org/abs/2501.04697)
+def stable_mse_loss(predictions, targets, reduction="mean", epsilon=1e-30):
+    # Convert to torch.float64 if not already
+    predictions = predictions.to(torch.float64)
+    targets = targets.to(torch.float64)
+    differences = predictions - targets
+    squared_differences = torch.clamp(differences ** 2, min=epsilon)
+    if reduction == "mean":
+        loss = torch.mean(squared_differences)
+    elif reduction == "sum":
+        loss = torch.sum(squared_differences)
+    elif reduction == "none":
+        loss = squared_differences
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
 
 def conditional_loss(
     model_pred: torch.Tensor, 
     target: torch.Tensor, 
     loss_type: str, 
-    reduction: str, 
+    reduction: str,
     huber_c: Optional[torch.Tensor] = None,
     gamma: float = 2.0,
     eps: float = 1e-8
 ):
     if loss_type == "l2":
-        loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
+        loss = stable_mse_loss(model_pred, target, reduction=reduction)
+        #loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
     elif loss_type == "l1":
         loss = torch.nn.functional.l1_loss(model_pred, target, reduction=reduction)
     elif loss_type == "huber":
