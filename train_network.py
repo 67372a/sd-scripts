@@ -623,7 +623,7 @@ class NetworkTrainer:
                     #    loss = loss * weighting
                     #if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
                     #    loss = apply_masked_loss(loss, batch)
-                    loss = loss.mean([1, 2, 3])
+                    loss = loss.mean(dim=[1, 2, 3])
 
                     loss_weights = batch["loss_weights"]  # 各sampleごとのweight
                     loss = loss * loss_weights
@@ -1883,7 +1883,7 @@ class NetworkTrainer:
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
                         loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma)
-                        
+
                         if weighting is not None:
                             loss = loss * weighting
                         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -2261,7 +2261,7 @@ class NetworkTrainer:
                             loss = loss * weighting
                         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
                             loss = apply_masked_loss(loss, batch)
-                        loss = loss.mean([1, 2, 3])
+                        loss = loss.mean(dim=[1, 2, 3])
 
                         loss_weights = batch["loss_weights"]  # 各sampleごとのweight
                         loss = loss * loss_weights
