@@ -610,6 +610,12 @@ class NetworkTrainer:
                         False,
                     )
 
+                    if noise_pred.dtype not in {torch.float32, torch.float64}:
+                        noise_pred = noise_pred.float()
+
+                    if target.dtype not in {torch.float32, torch.float64}:
+                        target = target.float()
+
                     # Compute loss
                     loss = train_util.conditional_loss(noise_pred, target, "l2", "none", None)
 
@@ -1867,10 +1873,17 @@ class NetworkTrainer:
                             train_unet,
                         )
 
+                        if noise_pred.dtype not in {torch.float32, torch.float64}:
+                            noise_pred = noise_pred.float()
+
+                        if target.dtype not in {torch.float32, torch.float64}:
+                            target = target.float()
+
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
                         loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma)
+                        
                         if weighting is not None:
                             loss = loss * weighting
                         if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
@@ -2232,6 +2245,12 @@ class NetworkTrainer:
                             weight_dtype,
                             train_unet,
                         )
+
+                        if noise_pred.dtype not in {torch.float32, torch.float64}:
+                            noise_pred = noise_pred.float()
+
+                        if target.dtype not in {torch.float32, torch.float64}:
+                            target = target.float()
 
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
