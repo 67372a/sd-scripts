@@ -6465,8 +6465,10 @@ def conditional_loss(
     eps: float = 1e-8
 ):
     if loss_type == "l2":
-        loss = stable_mse_loss(model_pred, target, reduction=reduction)
-        #loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
+        if model_pred.dtype == torch.float64 or target.dtype == torch.float64:
+            loss = stable_mse_loss(model_pred, target, reduction=reduction)
+        else:
+            loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
     elif loss_type == "l1":
         loss = torch.nn.functional.l1_loss(model_pred, target, reduction=reduction)
     elif loss_type == "huber":
