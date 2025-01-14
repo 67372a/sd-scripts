@@ -6442,15 +6442,30 @@ def calculate_val_loss_check(args, global_step, epoch_step, val_dataloader, trai
     return True
 
 # Inspired by Grokking at the Edge of Numerical Stability (https://arxiv.org/abs/2501.04697)
-def stable_mse_loss(predictions, targets, reduction="mean", epsilon=1e-30):
-    differences = predictions - targets
-    squared_differences = torch.clamp(differences ** 2, min=epsilon)
+def stable_mse_loss(predictions, targets, reduction="mean"):
+    # Compute at float64
+    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    squared_differences = differences ** 2
     if reduction == "mean":
         loss = torch.mean(squared_differences)
     elif reduction == "sum":
         loss = torch.sum(squared_differences)
     elif reduction == "none":
         loss = squared_differences
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
+
+def x_sigmoid_loss(predictions, targets, reduction="mean"):
+    # Compute at float64
+    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    sigmoid_differences = 2 * differences * torch.sigmoid(differences) - differences
+    if reduction == "mean":
+        loss = torch.mean(sigmoid_differences)
+    elif reduction == "sum":
+        loss = torch.sum(sigmoid_differences)
+    elif reduction == "none":
+        loss = sigmoid_differences
     else:
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
@@ -6491,6 +6506,8 @@ def conditional_loss(
             loss = torch.mean(loss)
         elif reduction == "sum":
             loss = torch.sum(loss)
+    elif loss_type == "x_sigmoid":
+        loss = x_sigmoid_loss(model_pred, target, reduction=reduction)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
