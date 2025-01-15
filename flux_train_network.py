@@ -5,7 +5,7 @@ import random
 from typing import Any, Optional
 
 import torch
-from accelerate import Accelerator
+from accelerate import Accelerator, AutocastKwargs
 
 from library.device_utils import clean_memory_on_device, init_ipex
 from library.strategy_flux import move_vision_encoder_to_device
@@ -226,7 +226,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 # otherwise, we need to convert it to target dtype
                 text_encoders[1].to(weight_dtype)
 
-            with accelerator.autocast(dtype=torch.float64 if args.loss_related_use_float64 else torch.float32):
+            with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                 dataset.new_cache_text_encoder_outputs(text_encoders, accelerator)
 
             # cache sample prompts
@@ -238,7 +238,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
                 prompts = train_util.load_prompts(args.sample_prompts)
                 sample_prompts_te_outputs = {}  # key: prompt, value: text encoder outputs
-                with accelerator.autocast(dtype=torch.float64 if args.loss_related_use_float64 else torch.float32), torch.no_grad():
+                with accelerator.autocast(), torch.no_grad():
                     for prompt_dict in prompts:
                         for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
                             if p not in sample_prompts_te_outputs:
@@ -400,7 +400,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         def call_dit(img, img_ids, t5_out, txt_ids, l_pooled, timesteps, guidance_vec, t5_attn_mask):
             # if not args.split_mode:
             # normal forward
-            with accelerator.autocast(dtype=torch.float64 if args.loss_related_use_float64 else torch.float32):
+            with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                 # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model (we should not keep it but I want to keep the inputs same for the model for testing)
                 model_pred = unet(
                     img=img,
