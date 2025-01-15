@@ -226,7 +226,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 # otherwise, we need to convert it to target dtype
                 text_encoders[1].to(weight_dtype)
 
-            with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
+            with accelerator.autocast():
                 dataset.new_cache_text_encoder_outputs(text_encoders, accelerator)
 
             # cache sample prompts
@@ -400,7 +400,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         def call_dit(img, img_ids, t5_out, txt_ids, l_pooled, timesteps, guidance_vec, t5_attn_mask):
             # if not args.split_mode:
             # normal forward
-            with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
+            with accelerator.autocast():
                 # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model (we should not keep it but I want to keep the inputs same for the model for testing)
                 model_pred = unet(
                     img=img,
