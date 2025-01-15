@@ -427,7 +427,7 @@ def get_noise(args, latents, noise, timesteps, train=True) -> torch.Tensor:
         t = timesteps.float() / max_timestep  # t ranges from 0 to 1
 
         if scaling_type == 'none':
-            scaling_factor = torch.ones_like(timesteps, dtype=torch.float32, device=latents.device)
+            scaling_factor = torch.ones_like(timesteps, dtype=latents.dtype, device=latents.device)
         elif scaling_type == 'linear':
             scaling_factor = t
         elif scaling_type == 'sine':

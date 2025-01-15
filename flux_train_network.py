@@ -226,7 +226,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 # otherwise, we need to convert it to target dtype
                 text_encoders[1].to(weight_dtype)
 
-            with accelerator.autocast():
+            with accelerator.autocast(dtype=torch.float64 if args.loss_related_use_float64 else torch.float32):
                 dataset.new_cache_text_encoder_outputs(text_encoders, accelerator)
 
             # cache sample prompts
@@ -238,7 +238,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
                 prompts = train_util.load_prompts(args.sample_prompts)
                 sample_prompts_te_outputs = {}  # key: prompt, value: text encoder outputs
-                with accelerator.autocast(), torch.no_grad():
+                with accelerator.autocast(dtype=torch.float64 if args.loss_related_use_float64 else torch.float32), torch.no_grad():
                     for prompt_dict in prompts:
                         for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
                             if p not in sample_prompts_te_outputs:
@@ -349,14 +349,18 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         train_unet,
         fixed_timesteps=None,
         train=True
-    ):
+    ):       
+        if args.loss_related_use_float64:
+            # Convert to float64, noise and noisy latents will be float64 due to using like on latents
+            latents = latents.to(torch.float64)
+
         # Sample noise that we'll add to the latents
         noise = torch.randn_like(latents)
         bsz = latents.shape[0]
 
         # get noisy model input and timesteps
         noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype, fixed_timesteps, train
+            args, noise_scheduler, latents, noise, accelerator.device, torch.float64 if args.loss_related_use_float64 else weight_dtype, fixed_timesteps, train
         )
 
         # pack latents and get img_ids
@@ -366,7 +370,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
         # get guidance
         # ensure guidance_scale in args is float
-        guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
+        guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device, dtype=torch.float64 if args.loss_related_use_float64 else torch.float32)
 
         # ensure the hidden state will require grad
         if args.gradient_checkpointing and train:
@@ -396,7 +400,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         def call_dit(img, img_ids, t5_out, txt_ids, l_pooled, timesteps, guidance_vec, t5_attn_mask):
             # if not args.split_mode:
             # normal forward
-            with accelerator.autocast():
+            with accelerator.autocast(dtype=torch.float64 if args.loss_related_use_float64 else torch.float32):
                 # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model (we should not keep it but I want to keep the inputs same for the model for testing)
                 model_pred = unet(
                     img=img,

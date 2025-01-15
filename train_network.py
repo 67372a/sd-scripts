@@ -23,7 +23,7 @@ from library.device_utils import init_ipex, clean_memory_on_device
 init_ipex()
 
 from accelerate.utils import set_seed
-from accelerate import Accelerator
+from accelerate import Accelerator, AutocastKwargs
 from diffusers import DDPMScheduler
 from library import deepspeed_utils, model_util, strategy_base, strategy_sd
 
@@ -199,8 +199,8 @@ def analyze_model_norms(unscaled_norms, scaled_norms):
 
 class NetworkTrainer:
     def __init__(self):
-        self.vae_scale_factor = 0.18215
-        self.is_sdxl = False
+        self.vae_scale_factor: float = 0.18215
+        self.is_sdxl: bool = False
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -425,7 +425,7 @@ class NetworkTrainer:
                 t.requires_grad_(True)
 
         # Predict the noise residual
-        with accelerator.autocast():
+        with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
             noise_pred = self.call_unet(
                 args,
                 accelerator,
@@ -458,7 +458,7 @@ class NetworkTrainer:
 
             if len(diff_output_pr_indices) > 0:
                 network.set_multiplier(0.0)
-                with torch.no_grad(), accelerator.autocast():
+                with torch.no_grad(), accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                     noise_pred_prior = self.call_unet(
                         args,
                         accelerator,
@@ -560,7 +560,7 @@ class NetworkTrainer:
             if text_encoder_outputs_list is not None:
                 text_encoder_conds = text_encoder_outputs_list  # List of text encoder outputs
             if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
-                with accelerator.autocast():
+                with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                     # Get the text embedding for conditioning
                     if args.weighted_captions:
                         input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
@@ -591,7 +591,7 @@ class NetworkTrainer:
 
             batch_size = latents.shape[0]
             for fixed_timesteps in timesteps_list:
-                with accelerator.autocast():
+                with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                     timesteps = torch.full((batch_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
 
                     # Get noise prediction and target
@@ -1832,7 +1832,7 @@ class NetworkTrainer:
                         # Prepare text encoder conditions
                         text_encoder_conds = batch.get("text_encoder_outputs_list", [])
                         if not text_encoder_conds or text_encoder_conds[0] is None or train_text_encoder:
-                            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                                 # Get the text embeddings
                                 if args.weighted_captions:
                                     input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])
@@ -2203,7 +2203,7 @@ class NetworkTrainer:
 
                         if len(text_encoder_conds) == 0 or text_encoder_conds[0] is None or train_text_encoder:
                             # TODO this does not work if 'some text_encoders are trained' and 'some are not and not cached'
-                            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                            with torch.set_grad_enabled(train_text_encoder), accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                                 # Get the text embedding for conditioning
                                 if args.weighted_captions:
                                     input_ids_list, weights_list = tokenize_strategy.tokenize_with_weights(batch["captions"])

@@ -2,7 +2,7 @@ import argparse
 from typing import List, Optional
 
 import torch
-from accelerate import Accelerator
+from accelerate import Accelerator, AutocastKwargs
 from library.device_utils import init_ipex, clean_memory_on_device
 
 init_ipex()
@@ -114,7 +114,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             # When TE is not be trained, it will not be prepared so we need to use explicit autocast
             text_encoders[0].to(accelerator.device, dtype=weight_dtype)
             text_encoders[1].to(accelerator.device, dtype=weight_dtype)
-            with accelerator.autocast():
+            with accelerator.autocast(AutocastKwargs(enabled=False if args.loss_related_use_float64 else True)):
                 dataset.new_cache_text_encoder_outputs(text_encoders + [accelerator.unwrap_model(text_encoders[-1])], accelerator)
             accelerator.wait_for_everyone()
 
