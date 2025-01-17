@@ -6456,6 +6456,28 @@ def stable_mse_loss(predictions, targets, reduction="mean"):
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
 
+def stable_log_cosh_loss(predictions, targets, reduction='mean'):
+    # Compute at float64
+    diff = predictions.to(torch.float64) - targets.to(torch.float64)
+    # For x >= 0
+    pos_mask = diff >= 0
+    # Compute log(cosh(x)) for positive x
+    logcosh_pos = diff + torch.nn.functional.softplus(-2 * diff) - math.log(2)
+    # For x < 0
+    logcosh_neg = -diff + torch.nn.functional.softplus(2 * diff) - math.log(2)
+    # Combine results
+    log_cosh = torch.where(pos_mask, logcosh_pos, logcosh_neg)
+
+    if reduction == "mean":
+        loss = torch.mean(log_cosh)
+    elif reduction == "sum":
+        loss = torch.sum(log_cosh)
+    elif reduction == "none":
+        loss = log_cosh
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
+
 def x_sigmoid_loss(predictions, targets, reduction="mean"):
     # Compute at float64
     differences = predictions.to(torch.float64) - targets.to(torch.float64)
@@ -6508,6 +6530,8 @@ def conditional_loss(
             loss = torch.sum(loss)
     elif loss_type == "x_sigmoid":
         loss = x_sigmoid_loss(model_pred, target, reduction=reduction)
+    elif loss_type == "log_cosh":
+        loss = stable_log_cosh_loss(model_pred, target, reduction=reduction)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
