@@ -7,7 +7,7 @@ opencv-python==4.10.0.84
 einops==0.8.0
 pytorch-lightning==2.5.0.post0
 bitsandbytes==0.45.0
-prodigyopt==1.1.1
+prodigyopt==1.1.2
 lion-pytorch==0.2.3
 schedulefree==1.4
 tensorboard==2.18.0
