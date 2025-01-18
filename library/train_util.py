@@ -6569,6 +6569,7 @@ def smooth_l2_log_loss(
         loss = loss
     else:
         raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
 
 def conditional_loss(
     model_pred: torch.Tensor, 
