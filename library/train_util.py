@@ -6559,7 +6559,7 @@ def smooth_l2_log_loss(
     """
     r = predictions.to(torch.float64) - targets.to(torch.float64)
     delta_squared = delta ** 2
-    loss = delta_squared * torch.log1p(r ** 2 / delta_squared)
+    loss = 0.5 * delta_squared * torch.log1p(r ** 2 / delta_squared)
     
     if reduction == "mean":
         loss = torch.mean(loss)
