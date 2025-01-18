@@ -6371,11 +6371,13 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
 
 
 def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler) -> Optional[torch.Tensor]:
-    if not (args.loss_type == "huber" or args.loss_type == "smooth_l1"):
+    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber"}:
         return None
 
     b_size = timesteps.shape[0]
-    if args.huber_schedule == "exponential":
+    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber"}:
+        result = torch.full((b_size,), args.huber_c * float(args.huber_scale), device=timesteps.device)
+    elif args.huber_schedule == "exponential":
         alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
         result = torch.exp(-alpha * timesteps) * float(args.huber_scale)
     elif args.huber_schedule == "snr":
@@ -6385,8 +6387,6 @@ def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler
         sigmas = ((1.0 - alphas_cumprod) / alphas_cumprod) ** 0.5
         result = (1 - args.huber_c) / (1 + sigmas) ** 2 + args.huber_c
         result = result.to(timesteps.device)
-    elif args.huber_schedule == "constant":
-        result = torch.full((b_size,), args.huber_c * float(args.huber_scale), device=timesteps.device)
     else:
         raise NotImplementedError(f"Unknown Huber loss schedule {args.huber_schedule}!")
 
@@ -6492,6 +6492,38 @@ def x_sigmoid_loss(predictions, targets, reduction="mean"):
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
 
+def pseudo_huber_loss(predictions, targets, delta=1.0, reduction="mean"):
+    """
+    Compute the Pseudo-Huber loss between true values and predictions.
+
+    Parameters:
+    y_true : array_like
+        The ground truth (correct) target values.
+    y_pred : array_like
+        The predicted target values.
+    delta : float, default=1.0
+        The parameter delta controls the transition point between the quadratic
+        and linear regions of the loss function.
+
+    Returns:
+    loss : array_like
+        The Pseudo-Huber loss values for each element.
+    """
+    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    # Compute the loss
+    loss = delta**2 * (torch.sqrt(1 + (differences / delta)**2) - 1)
+    # Apply the specified reduction method
+
+    if reduction == "mean":
+        loss = torch.mean(loss)
+    elif reduction == "sum":
+        loss = torch.sum(loss)
+    elif reduction == "none":
+        loss = loss
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
+
 def conditional_loss(
     model_pred: torch.Tensor, 
     target: torch.Tensor, 
@@ -6499,7 +6531,7 @@ def conditional_loss(
     reduction: str,
     huber_c: Optional[torch.Tensor] = None,
     gamma: float = 2.0,
-    eps: float = 1e-8
+    eps: float = 1e-8,
 ):
     if loss_type == "l2":
         if model_pred.dtype == torch.float64 or target.dtype == torch.float64:
@@ -6508,6 +6540,14 @@ def conditional_loss(
             loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
     elif loss_type == "l1":
         loss = torch.nn.functional.l1_loss(model_pred, target, reduction=reduction)
+    elif loss_type == "standard_pseudo_huber":
+        huber_c = huber_c.view(-1, 1, 1, 1)
+        loss = pseudo_huber_loss(model_pred, target, delta=huber_c, reduction=reduction)
+    elif loss_type == "standard_huber":
+        huber_c = huber_c.view(-1, 1, 1, 1)
+        model_pred = model_pred.to(torch.float64)
+        target = target.to(torch.float64)
+        loss = torch.nn.functional.HuberLoss(model_pred, target, reduction=reduction, delta=huber_c)
     elif loss_type == "huber":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = 2 * huber_c * (torch.sqrt((model_pred - target) ** 2 + huber_c**2) - huber_c)
