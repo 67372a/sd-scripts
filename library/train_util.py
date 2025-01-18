@@ -6371,11 +6371,11 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
 
 
 def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler) -> Optional[torch.Tensor]:
-    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1"}:
+    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log"}:
         return None
 
     b_size = timesteps.shape[0]
-    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1"}:
+    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log"}:
         result = torch.full((b_size,), args.huber_c * float(args.huber_scale), device=timesteps.device)
     elif args.huber_schedule == "exponential":
         alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
@@ -6538,6 +6538,38 @@ def pseudo_huber_loss(predictions, targets, delta=1.0, reduction="mean"):
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
 
+def smooth_l2_log_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    delta: float = 1.0,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Functional version of the smooth l2->log loss.
+    
+    Args:
+        predictions: Predicted values of shape (*)
+        targets: Target values of shape (*), same shape as predictions
+        delta: Transition point between L2 and logarithmic behavior
+        reduction: Reduction to apply to batch: 'none' | 'mean' | 'sum'
+        
+    Returns:
+        Loss tensor of shape () if reduction is 'mean' or 'sum',
+        or same shape as inputs if reduction is 'none'
+    """
+    r = predictions.to(torch.float64) - targets.to(torch.float64)
+    delta_squared = delta ** 2
+    loss = delta_squared * torch.log1p(r ** 2 / delta_squared)
+    
+    if reduction == "mean":
+        loss = torch.mean(loss)
+    elif reduction == "sum":
+        loss = torch.sum(loss)
+    elif reduction == "none":
+        loss = loss
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+
 def conditional_loss(
     model_pred: torch.Tensor, 
     target: torch.Tensor, 
@@ -6593,6 +6625,9 @@ def conditional_loss(
         loss = stable_log_cosh_loss(model_pred, target, reduction=reduction)
     elif loss_type == "squared_logarithmic":
         loss = stable_msle_loss(model_pred, target, reduction=reduction)
+    elif loss_type == "smooth_l2_log":
+        huber_c = huber_c.view(-1, 1, 1, 1)
+        loss = smooth_l2_log_loss(model_pred, target, delta=huber_c, reduction=reduction)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
