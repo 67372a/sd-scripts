@@ -6477,6 +6477,20 @@ def stable_log_cosh_loss(predictions, targets, reduction='mean'):
     else:
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
+    
+def stable_msle_loss(predictions, targets, reduction='mean'):
+    # Compute at float64
+    msle = torch.square(torch.log(targets.to(torch.float64) + 1) - torch.log(predictions.to(torch.float64) + 1))
+
+    if reduction == "mean":
+        loss = torch.mean(msle)
+    elif reduction == "sum":
+        loss = torch.sum(msle)
+    elif reduction == "none":
+        loss = msle
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
 
 def x_sigmoid_loss(predictions, targets, reduction="mean"):
     # Compute at float64
@@ -6548,6 +6562,11 @@ def conditional_loss(
         model_pred = model_pred.to(torch.float64)
         target = target.to(torch.float64)
         loss = torch.nn.functional.HuberLoss(model_pred, target, reduction=reduction, delta=huber_c)
+    elif loss_type == "standard_smooth_l1":
+        huber_c = huber_c.view(-1, 1, 1, 1)
+        model_pred = model_pred.to(torch.float64)
+        target = target.to(torch.float64)
+        loss = torch.nn.functional.SmoothL1Loss(model_pred, target, reduction=reduction, beta=huber_c)
     elif loss_type == "huber":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = 2 * huber_c * (torch.sqrt((model_pred - target) ** 2 + huber_c**2) - huber_c)
@@ -6572,6 +6591,8 @@ def conditional_loss(
         loss = x_sigmoid_loss(model_pred, target, reduction=reduction)
     elif loss_type == "log_cosh":
         loss = stable_log_cosh_loss(model_pred, target, reduction=reduction)
+    elif loss_type == "squared_logarithmic":
+        loss = stable_msle_loss(model_pred, target, reduction=reduction)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
