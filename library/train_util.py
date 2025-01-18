@@ -6593,12 +6593,12 @@ def conditional_loss(
         huber_c = huber_c.view(-1, 1, 1, 1)
         model_pred = model_pred.to(torch.float64)
         target = target.to(torch.float64)
-        loss = torch.nn.functional.HuberLoss(model_pred, target, reduction=reduction, delta=huber_c)
+        loss = torch.nn.functional.huber_loss(model_pred, target, reduction=reduction, delta=huber_c)
     elif loss_type == "standard_smooth_l1":
         huber_c = huber_c.view(-1, 1, 1, 1)
         model_pred = model_pred.to(torch.float64)
         target = target.to(torch.float64)
-        loss = torch.nn.functional.SmoothL1Loss(model_pred, target, reduction=reduction, beta=huber_c)
+        loss = torch.nn.functional.smooth_l1_loss(model_pred, target, reduction=reduction, beta=huber_c)
     elif loss_type == "huber":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = 2 * huber_c * (torch.sqrt((model_pred - target) ** 2 + huber_c**2) - huber_c)
