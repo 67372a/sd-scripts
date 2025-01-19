@@ -6441,6 +6441,24 @@ def calculate_val_loss_check(args, global_step, epoch_step, val_dataloader, trai
                 return False
     return True
 
+def soft_welsch_loss(predictions:torch.Tensor, 
+                    targets:torch.Tensor, 
+                    reduction: str = "mean", 
+                    scale: float = 1.0, 
+                    delta: float = 1.0):
+    # Compute at float64
+    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    loss = torch.arcsinh(4 * (scale * differences**2) / delta) * delta / 4
+    if reduction == "mean":
+        loss = torch.mean(loss)
+    elif reduction == "sum":
+        loss = torch.sum(loss)
+    elif reduction == "none":
+        loss = loss
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
+
 # Inspired by Grokking at the Edge of Numerical Stability (https://arxiv.org/abs/2501.04697)
 def stable_mse_loss(predictions, targets, reduction="mean"):
     # Compute at float64
@@ -6579,6 +6597,7 @@ def conditional_loss(
     huber_c: Optional[torch.Tensor] = None,
     gamma: float = 2.0,
     eps: float = 1e-8,
+    scale: float = 1,
 ):
     if loss_type == "l2":
         if model_pred.dtype == torch.float64 or target.dtype == torch.float64:
@@ -6629,6 +6648,9 @@ def conditional_loss(
     elif loss_type == "smooth_l2_log":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = smooth_l2_log_loss(model_pred, target, delta=huber_c, reduction=reduction)
+    elif loss_type == "soft_welsch":
+        huber_c = huber_c.view(-1, 1, 1, 1)
+        loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
