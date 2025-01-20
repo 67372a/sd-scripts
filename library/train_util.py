@@ -4095,6 +4095,13 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
     )
 
     parser.add_argument(
+        "--loss_scale",
+        type=float,
+        default=1.0,
+        help="A scale factor for certain loss types, currently only soft welsch.",
+    )
+
+    parser.add_argument(
         "--lowram",
         action="store_true",
         help="enable low RAM optimization. e.g. load models to VRAM instead of RAM (for machines which have bigger VRAM than RAM such as Colab and Kaggle) / メインメモリが少ない環境向け最適化を有効にする。たとえばVRAMにモデルを読み込む等（ColabやKaggleなどRAMに比べてVRAMが多い環境向け）",
@@ -6597,7 +6604,7 @@ def conditional_loss(
     huber_c: Optional[torch.Tensor] = None,
     gamma: float = 2.0,
     eps: float = 1e-8,
-    scale: float = 1,
+    scale: float = 1.0,
 ):
     if loss_type == "l2":
         if model_pred.dtype == torch.float64 or target.dtype == torch.float64:

@@ -1882,7 +1882,7 @@ class NetworkTrainer:
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
-                        loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma)
+                        loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma, scale=float(args.loss_scale))
 
                         if weighting is not None:
                             loss = loss * weighting
@@ -2255,7 +2255,7 @@ class NetworkTrainer:
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
                         gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
-                        loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma)
+                        loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma, scale=float(args.loss_scale))
 
                         if weighting is not None:
                             loss = loss * weighting
