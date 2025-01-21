@@ -114,7 +114,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             # When TE is not be trained, it will not be prepared so we need to use explicit autocast
             text_encoders[0].to(accelerator.device, dtype=weight_dtype)
             text_encoders[1].to(accelerator.device, dtype=weight_dtype)
-            with accelerator.autocast():
+            with accelerator.autocast(), torch.autocast(enabled=args.loss_related_use_float64, dtype=torch.float64, device_type=str(accelerator.device)):
                 dataset.new_cache_text_encoder_outputs(text_encoders + [accelerator.unwrap_model(text_encoders[-1])], accelerator)
             accelerator.wait_for_everyone()
 
@@ -135,7 +135,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         if "text_encoder_outputs1_list" not in batch or batch["text_encoder_outputs1_list"] is None:
             input_ids1 = batch["input_ids"]
             input_ids2 = batch["input_ids2"]
-            with torch.enable_grad():
+            with torch.enable_grad(), torch.autocast(enabled=args.loss_related_use_float64, dtype=torch.float64, device_type=str(accelerator.device)):
                 # Get the text embedding for conditioning
                 # TODO support weighted captions
                 # if args.weighted_captions:
@@ -203,7 +203,8 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         orig_size = batch["original_sizes_hw"]
         crop_size = batch["crop_top_lefts"]
         target_size = batch["target_sizes_hw"]
-        embs = sdxl_train_util.get_size_embeddings(orig_size, crop_size, target_size, accelerator.device).to(weight_dtype)
+        with torch.autocast(enabled=args.loss_related_use_float64, dtype=torch.float64, device_type=str(accelerator.device)):
+            embs = sdxl_train_util.get_size_embeddings(orig_size, crop_size, target_size, accelerator.device).to(weight_dtype)
 
         # concat embeddings
         encoder_hidden_states1, encoder_hidden_states2, pool2 = text_conds
