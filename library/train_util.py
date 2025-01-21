@@ -6378,11 +6378,11 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
 
 
 def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler) -> Optional[torch.Tensor]:
-    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log", "soft_welsch"}:
+    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log", "soft_welsch","scaled_quadratic"}:
         return None
 
     b_size = timesteps.shape[0]
-    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log", "soft_welsch"}:
+    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log", "soft_welsch","scaled_quadratic"}:
         result = torch.full((b_size,), args.huber_c * float(args.huber_scale), device=timesteps.device)
     elif args.huber_schedule == "exponential":
         alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
@@ -6596,6 +6596,25 @@ def smooth_l2_log_loss(
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
 
+def scaled_quadratic_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    delta: float = 1.0,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    r = predictions.to(torch.float64) - targets.to(torch.float64)
+    loss = (r / delta)**2
+    
+    if reduction == "mean":
+        loss = torch.mean(loss)
+    elif reduction == "sum":
+        loss = torch.sum(loss)
+    elif reduction == "none":
+        loss = loss
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
+
 def conditional_loss(
     model_pred: torch.Tensor, 
     target: torch.Tensor, 
@@ -6656,6 +6675,9 @@ def conditional_loss(
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = smooth_l2_log_loss(model_pred, target, delta=huber_c, reduction=reduction)
     elif loss_type == "soft_welsch":
+        huber_c = huber_c.view(-1, 1, 1, 1)
+        loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
+    elif loss_type == "scaled_quadratic":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
     else:
