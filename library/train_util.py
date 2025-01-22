@@ -6453,8 +6453,7 @@ def soft_welsch_loss(predictions:torch.Tensor,
                     reduction: str = "mean", 
                     scale: float = 1.0, 
                     delta: float = 1.0):
-    # Compute at float64
-    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    differences = predictions - targets
     loss = torch.arcsinh(4 * (scale * differences**2) / delta) * delta / 4
     if reduction == "mean":
         loss = torch.mean(loss)
@@ -6468,8 +6467,7 @@ def soft_welsch_loss(predictions:torch.Tensor,
 
 # Inspired by Grokking at the Edge of Numerical Stability (https://arxiv.org/abs/2501.04697)
 def stable_mse_loss(predictions, targets, reduction="mean"):
-    # Compute at float64
-    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    differences = predictions - targets
     squared_differences = differences ** 2
     if reduction == "mean":
         loss = torch.mean(squared_differences)
@@ -6482,8 +6480,7 @@ def stable_mse_loss(predictions, targets, reduction="mean"):
     return loss
 
 def stable_log_cosh_loss(predictions, targets, reduction='mean'):
-    # Compute at float64
-    diff = predictions.to(torch.float64) - targets.to(torch.float64)
+    diff = predictions - targets
     # For x >= 0
     pos_mask = diff >= 0
     # Compute log(cosh(x)) for positive x
@@ -6504,8 +6501,7 @@ def stable_log_cosh_loss(predictions, targets, reduction='mean'):
     return loss
     
 def stable_msle_loss(predictions, targets, reduction='mean'):
-    # Compute at float64
-    msle = torch.square(torch.log(targets.to(torch.float64) + 1) - torch.log(predictions.to(torch.float64) + 1))
+    msle = torch.square(torch.log(targets + 1) - torch.log(predictions + 1))
 
     if reduction == "mean":
         loss = torch.mean(msle)
@@ -6519,7 +6515,7 @@ def stable_msle_loss(predictions, targets, reduction='mean'):
 
 def x_sigmoid_loss(predictions, targets, reduction="mean"):
     # Compute at float64
-    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    differences = predictions - targets
     sigmoid_differences = 2 * differences * torch.sigmoid(differences) - differences
     if reduction == "mean":
         loss = torch.mean(sigmoid_differences)
@@ -6548,7 +6544,7 @@ def pseudo_huber_loss(predictions, targets, delta=1.0, reduction="mean"):
     loss : array_like
         The Pseudo-Huber loss values for each element.
     """
-    differences = predictions.to(torch.float64) - targets.to(torch.float64)
+    differences = predictions - targets
     # Compute the loss
     loss = delta**2 * (torch.sqrt(1 + (differences / delta)**2) - 1)
     # Apply the specified reduction method
@@ -6582,7 +6578,7 @@ def smooth_l2_log_loss(
         Loss tensor of shape () if reduction is 'mean' or 'sum',
         or same shape as inputs if reduction is 'none'
     """
-    r = predictions.to(torch.float64) - targets.to(torch.float64)
+    r = predictions - targets
     delta_squared = delta ** 2
     loss = 0.5 * delta_squared * torch.log1p(r ** 2 / delta_squared)
     
@@ -6602,7 +6598,7 @@ def scaled_quadratic_loss(
     delta: float = 1.0,
     reduction: str = 'mean'
 ) -> torch.Tensor:
-    r = predictions.to(torch.float64) - targets.to(torch.float64)
+    r = predictions - targets
     loss = (r / delta)**2
     
     if reduction == "mean":
@@ -6637,13 +6633,9 @@ def conditional_loss(
         loss = pseudo_huber_loss(model_pred, target, delta=huber_c, reduction=reduction)
     elif loss_type == "standard_huber":
         huber_c = huber_c.view(-1, 1, 1, 1)
-        model_pred = model_pred.to(torch.float64)
-        target = target.to(torch.float64)
         loss = torch.nn.functional.huber_loss(model_pred, target, reduction=reduction, delta=huber_c[0].item())
     elif loss_type == "standard_smooth_l1":
         huber_c = huber_c.view(-1, 1, 1, 1)
-        model_pred = model_pred.to(torch.float64)
-        target = target.to(torch.float64)
         loss = torch.nn.functional.smooth_l1_loss(model_pred, target, reduction=reduction, beta=huber_c[0].item())
     elif loss_type == "huber":
         huber_c = huber_c.view(-1, 1, 1, 1)
