@@ -6671,7 +6671,7 @@ def conditional_loss(
         loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
     elif loss_type == "scaled_quadratic":
         huber_c = huber_c.view(-1, 1, 1, 1)
-        loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
+        loss = scaled_quadratic_loss(model_pred, target, reduction=reduction, delta=huber_c)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
