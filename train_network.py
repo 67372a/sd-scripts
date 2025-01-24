@@ -1001,8 +1001,8 @@ class NetworkTrainer:
             shuffle=True,
             collate_fn=collator,
             num_workers=n_workers,
+            pin_memory=args.pin_data_loader_memory or args.pin_memory,
             persistent_workers=args.persistent_data_loader_workers,
-            pin_memory=bool(args.pin_data_loader_memory) if args.pin_data_loader_memory else False
         )
         
         val_dataloader = torch.utils.data.DataLoader(
@@ -1011,8 +1011,8 @@ class NetworkTrainer:
             batch_size=1,
             collate_fn=collator,
             num_workers=n_workers,
+            pin_memory=args.pin_data_loader_memory or args.pin_memory,
             persistent_workers=args.persistent_data_loader_workers,
-            pin_memory=bool(args.pin_data_loader_memory) if args.pin_data_loader_memory else False
         )
 
         # 学習ステップ数を計算する
