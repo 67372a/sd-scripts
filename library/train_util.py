@@ -153,7 +153,7 @@ TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX_SD3 = "_sd3_te.npz"
 
 def split_train_val(paths, is_train, validation_split, validation_seed):
     if validation_seed is not None:
-        print(f"Using validation seed: {validation_seed}")
+        logger.info(f"Using validation seed: {validation_seed}")
         prevstate = random.getstate()
         random.seed(validation_seed)
         random.shuffle(paths)
@@ -5554,7 +5554,7 @@ def prepare_accelerator(args: argparse.Namespace):
     dataloader_config = DataLoaderConfiguration(non_blocking=args.pin_memory)
 
     if args.full_bf16 and getattr(args, "stochastic_accumulation", False):
-        # Don't set gradient_accumulation_steps, as handled manually in training loop for SAM
+        # Don't set gradient_accumulation_steps, as handled manually in training loop
         accelerator = Accelerator(
             mixed_precision=args.mixed_precision,
             log_with=log_with,
@@ -5575,7 +5575,7 @@ def prepare_accelerator(args: argparse.Namespace):
             deepspeed_plugin=deepspeed_plugin,
             dataloader_config=dataloader_config,
         )
-    print("accelerator device:", accelerator.device)
+    logger.info(f"accelerator device: {accelerator.device}")
     return accelerator
 
 
