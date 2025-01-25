@@ -5494,7 +5494,7 @@ def prepare_accelerator(args: argparse.Namespace):
     this function also prepares deepspeed plugin
     """
 
-    if args.logging_dir is None:
+    if args.logging_dir is None or (isinstance(args.logging_dir, str) and args.logging_dir.strip() == ''):
         logging_dir = None
     else:
         log_prefix = "" if args.log_prefix is None else args.log_prefix
