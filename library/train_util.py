@@ -6641,7 +6641,7 @@ def standard_deviation_loss(
         predictions: torch.Tensor,
         targets: torch.Tensor,
         reduction: str = 'mean',
-        eps: float = 1e-30):
+        eps: float = 1e-30) -> torch.Tensor:
     """
     Calculate standard deviation loss between predicted and true values.
     
