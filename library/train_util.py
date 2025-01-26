@@ -6637,6 +6637,38 @@ def scaled_quadratic_loss(
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
 
+def standard_deviation_loss(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        reduction: str = 'mean',
+        eps: float = 1e-30):
+    """
+    Calculate standard deviation loss between predicted and true values.
+    
+    Args:
+        predictions (torch.Tensor): Predicted values
+        targets (torch.Tensor): True values
+        eps (float): Small constant to prevent numerical instability
+                    when taking square root
+        
+    Returns:
+        torch.Tensor: The standard deviation loss
+    """
+    n = predictions.size(0)
+    squared_diff = (predictions - targets) ** 2
+    mean_squared_diff = torch.sum(squared_diff) / n
+    mean_squared_diff_sqrt = torch.sqrt(mean_squared_diff + eps)
+
+    if reduction == "mean":
+        loss = torch.mean(mean_squared_diff_sqrt)
+    elif reduction == "sum":
+        loss = torch.sum(mean_squared_diff_sqrt)
+    elif reduction == "none":
+        loss = mean_squared_diff_sqrt
+    else:
+        raise ValueError(f"Unsupported reduction type: {reduction}")
+    return loss
+
 def conditional_loss(
     model_pred: torch.Tensor, 
     target: torch.Tensor, 
@@ -6698,6 +6730,8 @@ def conditional_loss(
     elif loss_type == "scaled_quadratic":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = scaled_quadratic_loss(model_pred, target, reduction=reduction, delta=huber_c)
+    elif loss_type == "standard_deviation_loss":
+        loss = standard_deviation_loss(model_pred, target, reduction=reduction)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss
