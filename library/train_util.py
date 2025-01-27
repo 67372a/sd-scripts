@@ -4230,6 +4230,26 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
             "--prior_loss_weight", type=float, default=1.0, help="loss weight for regularization images / 正則化画像のlossの重み"
         )
 
+    parser.add_argument(
+        "--timestep_sampling",
+        choices=["uniform", "sigmoid", "shift", "flux_shift"],
+        default="uniform",
+        help="Method to sample timesteps: uniform random, sigmoid of random normal, shift of sigmoid and FLUX.1 shifting."
+        " / タイムステップをサンプリングする方法：random uniform、random normalのsigmoid、sigmoidのシフト、FLUX.1のシフト。",
+    )
+    parser.add_argument(
+        "--sigmoid_scale",
+        type=float,
+        default=1.0,
+        help='Scale factor for sigmoid timestep sampling (only used when timestep-sampling is "sigmoid"). / sigmoidタイムステップサンプリングの倍率（timestep-samplingが"sigmoid"の場合のみ有効）。',
+    )
+    parser.add_argument(
+        "--discrete_flow_shift",
+        type=float,
+        default=1.0,
+        help="Discrete flow shift for the Euler Discrete Scheduler, default is 1.0. / Euler Discrete Schedulerの離散フローシフト、デフォルトは1.0。",
+    )
+
 
 def add_masked_loss_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
@@ -6241,7 +6261,15 @@ def save_sd_model_on_train_end_common(
         if args.huggingface_repo_id is not None:
             huggingface_util.upload(args, out_dir, "/" + model_name, force_sync_upload=True)
 
-def get_timesteps(min_timestep, max_timestep, b_size, device):
+def time_shift(mu: float, sigma: float, t: torch.Tensor):
+    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
+
+def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15) -> Callable[[float], float]:
+    m = (y2 - y1) / (x2 - x1)
+    b = y1 - m * x1
+    return lambda x: m * x + b
+
+def get_timesteps(min_timestep, max_timestep, b_size, device) -> torch.Tensor:
     timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
     timesteps = timesteps.long().to(device)
     return timesteps
@@ -6313,7 +6341,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
             noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
         )
 
-    b_size = latents.shape[0]
+    b_size, _, h, w = latents.shape
 
     # Use fixed timesteps if provided
     # Use laplace_weights if available and in train mode
@@ -6325,7 +6353,18 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
             noise_scheduler.laplace_weights,
             num_samples=b_size,
             replacement=True
-        ).to(latents.device)
+        ).long().to(latents.device)
+    elif train and args.timestep_sampling != "uniform":
+        shift = args.discrete_flow_shift
+        logits_norm = torch.randn(b_size,  device="cpu")
+        logits_norm = logits_norm * args.sigmoid_scale 
+        timesteps = logits_norm.sigmoid()
+        if args.timestep_sampling == "flux_shift":
+            mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+            timesteps = time_shift(mu, 1.0, timesteps)
+        else:
+            timesteps = (timesteps * shift) / (1 + (shift - 1) * timesteps)
+        timesteps = min_timestep + (timesteps * (max_timestep - min_timestep)).long().to(latents.device)
     else:
         # Fallback to default (random) sampling
         timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
