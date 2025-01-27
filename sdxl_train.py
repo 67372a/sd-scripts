@@ -817,12 +817,14 @@ def train(args):
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
     )
+
+    if args.zero_terminal_snr:
+        custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
+
     prepare_scheduler_for_custom_training(noise_scheduler, 
                                           accelerator.device, 
                                           mu=args.laplace_timestep_sampling_mu,
                                           b=args.laplace_timestep_sampling_b)
-    if args.zero_terminal_snr:
-        custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
     if args.edm2_loss_weighting:
         values = args.edm2_loss_weighting_optimizer.split(".")
