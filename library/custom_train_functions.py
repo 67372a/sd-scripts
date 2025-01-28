@@ -472,7 +472,7 @@ def get_weighted_text_embeddings(
 # https://wandb.ai/johnowhitaker/multires_noise/reports/Multi-Resolution-Noise-for-Diffusion-Model-Training--VmlldzozNjYyOTU2
 def pyramid_noise_like(noise, device, iterations=6, discount=0.4, scaling_factor=None):
     if scaling_factor is None:
-        scaling_factor = torch.ones(2, device=device)
+        scaling_factor = torch.ones(noise.shape[0], device=device)
     scaling_factor_reshaped = scaling_factor.view(-1, 1, 1, 1)
 
     b, c, w, h = noise.shape  # EDIT: w and h get over-written, rename for a different variant!
