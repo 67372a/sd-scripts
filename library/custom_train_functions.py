@@ -470,13 +470,17 @@ def get_weighted_text_embeddings(
 
 
 # https://wandb.ai/johnowhitaker/multires_noise/reports/Multi-Resolution-Noise-for-Diffusion-Model-Training--VmlldzozNjYyOTU2
-def pyramid_noise_like(noise, device, iterations=6, discount=0.4):
+def pyramid_noise_like(noise, device, iterations=6, discount=0.4, scaling_factor=None):
+    if scaling_factor is None:
+        scaling_factor = torch.ones(2, device=device)
+    scaling_factor_reshaped = scaling_factor.view(-1, 1, 1, 1)
+
     b, c, w, h = noise.shape  # EDIT: w and h get over-written, rename for a different variant!
     u = torch.nn.Upsample(size=(w, h), mode="bilinear").to(device)
     for i in range(iterations):
         r = random.random() * 2 + 2  # Rather than always going 2x,
         wn, hn = max(1, int(w / (r**i))), max(1, int(h / (r**i)))
-        noise += u(torch.randn(b, c, wn, hn).to(device)) * discount**i
+        noise += (u(torch.randn(b, c, wn, hn).to(device)) * (discount * scaling_factor_reshaped)**i) 
         if wn == 1 or hn == 1:
             break  # Lowest resolution is 1x1
     return noise / noise.std()  # Scaled back to roughly unit variance

@@ -4032,6 +4032,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=0.0,
         help="The minimum value of IP noise gamma applied for any given timestep.",
     )
+
     parser.add_argument(
         "--ip_noise_gamma_scaling_exponent",
         type=float,
@@ -4062,6 +4063,14 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         type=float,
         default=0.3,
         help="set discount value for multires noise (has no effect without --multires_noise_iterations) / Multires noiseのdiscount値を設定する（--multires_noise_iterations指定時のみ有効）",
+    )
+
+    parser.add_argument(
+        "--multires_noise_scaling",
+        type=str,
+        default="none",
+        choices=["none", "snr"],
+        help="The scaling applied to multi res noise across timesteps.",
     )
     parser.add_argument(
         "--adaptive_noise_scale",
@@ -6336,11 +6345,6 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
             noise_offset = args.noise_offset
         noise = custom_train_functions.apply_noise_offset(latents, noise, noise_offset, args.adaptive_noise_scale)
 
-    if args.multires_noise_iterations and train:
-        noise = custom_train_functions.pyramid_noise_like(
-            noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
-        )
-
     b_size, _, h, w = latents.shape
 
     # Use fixed timesteps if provided
@@ -6369,6 +6373,41 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
         # Fallback to default (random) sampling
         timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
 
+    if (train and ((args.multires_noise_iterations and args.multires_noise_scaling == 'snr') or
+        (args.ip_noise_gamma and args.ip_noise_gamma_scaling == 'snr'))):
+            # Get SNR for current timesteps
+            snr = noise_scheduler.all_snr[timesteps]
+            
+            # Normalize SNR to [0, 1] range for scaling
+            snr_min = noise_scheduler.all_snr.min()
+            snr_max = noise_scheduler.all_snr.max()
+
+            # Handle edge case where snr equals snr_min
+            numerator = snr - snr_min
+            denominator = snr_max - snr_min
+
+            # Create a mask for timesteps where numerator is 0
+            zero_mask = (numerator == 0)
+            
+            # Calculate normalized SNR, setting it to 1 where numerator is 0
+            snr_normalized = torch.where(
+                zero_mask,
+                torch.ones_like(numerator),
+                numerator / denominator
+            )
+
+            # Ensure snr_normalized is in the range [0, 1]
+            snr_normalized = snr_normalized.clamp(0.0, 1.0)
+
+    if args.multires_noise_iterations and train:
+        noise = custom_train_functions.pyramid_noise_like(
+            noise, 
+            latents.device, 
+            args.multires_noise_iterations, 
+            torch.full_like(noise, args.multires_noise_discount), 
+            scaling_factor=snr_normalized if args.multires_noise_scaling == 'snr' else None,
+        )
+
     if args.immiscible_noise and args.immiscible_diffusion and train:
         noisy_latents = immiscible_diffusion(args, noise_scheduler, latents, noise, timesteps)
     elif args.ip_noise_gamma and train:
@@ -6396,6 +6435,8 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
                 torch.tensor(float(max_timestep) + 1, device=latents.device)
             )
             scaling_factor = torch.log(timesteps.float() + 1) / scaling_denominator
+        elif scaling_type == 'snr':
+            scaling_factor = snr_normalized
         else:
             raise ValueError(f"Unknown ip_noise_gamma_scaling type: {scaling_type}")
 
