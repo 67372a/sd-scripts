@@ -6702,10 +6702,14 @@ def scaled_quadratic_loss(
     predictions: torch.Tensor,
     targets: torch.Tensor,
     delta: float = 1.0,
-    reduction: str = 'mean'
+    reduction: str = 'mean',
+    eps: float = 1e-37,
 ) -> torch.Tensor:
     r = predictions - targets
     loss = (r / delta)**2
+
+    # Add tiny as eps to address underflows due to squaring
+    loss = loss.add(eps)
     
     if reduction == "mean":
         loss = torch.mean(loss)
@@ -6809,7 +6813,7 @@ def conditional_loss(
         loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
     elif loss_type == "scaled_quadratic":
         huber_c = huber_c.view(-1, 1, 1, 1)
-        loss = scaled_quadratic_loss(model_pred, target, reduction=reduction, delta=huber_c)
+        loss = scaled_quadratic_loss(model_pred, target, reduction=reduction, delta=huber_c, eps=torch.finfo(torch.float32).tiny)
     elif loss_type == "standard_deviation_loss":
         loss = standard_deviation_loss(model_pred, target, reduction=reduction)
     else:
