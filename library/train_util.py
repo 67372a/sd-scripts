@@ -6705,7 +6705,7 @@ def scaled_quadratic_loss(
     reduction: str = 'mean',
     eps: float = 1e-37,
 ) -> torch.Tensor:
-    r = predictions - targets
+    r = predictions.to(torch.float64) - targets.to(torch.float64)
     loss = (r / delta)**2
 
     # Add tiny as eps to address underflows due to squaring
