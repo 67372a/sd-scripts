@@ -15,7 +15,7 @@ safetensors==0.5.2
 hpsv2==1.2.0
 # gradio==3.16.2
 altair==5.5.0
-narwhals==1.23.0
+narwhals==1.24.1
 easygui==0.98.3
 toml==0.10.2
 voluptuous==0.15.2
