@@ -6572,9 +6572,13 @@ def soft_welsch_loss(predictions:torch.Tensor,
     return loss
 
 # Inspired by Grokking at the Edge of Numerical Stability (https://arxiv.org/abs/2501.04697)
-def stable_mse_loss(predictions, targets, reduction="mean"):
-    differences = predictions - targets
+def stable_mse_loss(predictions, targets, reduction="mean", eps=1e-37):
+    differences = predictions.to(torch.float64) - targets.to(torch.float64)
     squared_differences = differences ** 2
+
+    # Add eps to address underflows due to squaring
+    squared_differences = squared_differences.add(eps)
+
     if reduction == "mean":
         loss = torch.mean(squared_differences)
     elif reduction == "sum":
@@ -6708,7 +6712,7 @@ def scaled_quadratic_loss(
     r = predictions.to(torch.float64) - targets.to(torch.float64)
     loss = (r / delta)**2
 
-    # Add tiny as eps to address underflows due to squaring
+    # Add eps to address underflows due to squaring
     loss = loss.add(eps)
     
     if reduction == "mean":
@@ -6764,10 +6768,7 @@ def conditional_loss(
     scale: float = 1.0,
 ):
     if loss_type == "l2":
-        if model_pred.dtype == torch.float64 or target.dtype == torch.float64:
-            loss = stable_mse_loss(model_pred, target, reduction=reduction)
-        else:
-            loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
+        loss = stable_mse_loss(model_pred, target, reduction=reduction, eps=torch.finfo(torch.float32).tiny)
     elif loss_type == "l1":
         loss = torch.nn.functional.l1_loss(model_pred, target, reduction=reduction)
     elif loss_type == "standard_pseudo_huber":
