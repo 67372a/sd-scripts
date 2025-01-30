@@ -449,14 +449,16 @@ def train(args):
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
     # 学習を準備する
-    if cache_latents:
+    if cache_latents or val_dataset_group is not None:
         vae.to(accelerator.device, dtype=vae_dtype)
         vae.requires_grad_(False)
         vae.eval()
 
-        train_dataset_group.new_cache_latents(vae, accelerator)
+        if cache_latents:
+            train_dataset_group.new_cache_latents(vae, accelerator)
+
         if val_dataset_group is not None:
-            print("Cache validation latents...")
+            print("Caching validation latents...")
             val_dataset_group.new_cache_latents(vae, accelerator)
         vae.to("cpu")
         clean_memory_on_device(accelerator.device)
