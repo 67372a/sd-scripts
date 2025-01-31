@@ -19,7 +19,7 @@ narwhals==1.24.1
 easygui==0.98.3
 toml==0.10.2
 voluptuous==0.15.2
-huggingface-hub==0.28.0
+huggingface-hub==0.28.1
 matplotlib==3.10.0
 scipy==1.15.1
 # for Image utils
