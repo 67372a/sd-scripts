@@ -112,7 +112,7 @@ def main(args):
     def process_batch(is_last):
         for bucket in bucket_manager.buckets:
             if (is_last and len(bucket) > 0) or len(bucket) >= args.batch_size:
-                train_util.cache_batch_latents(vae, True, bucket, args.flip_aug, args.alpha_mask, False)
+                train_util.cache_batch_latents(vae, True, bucket, args.flip_aug, args.alpha_mask, random_crop=False, random_crop_padding_percent=0.05)
                 bucket.clear()
 
     # 読み込みの高速化のためにDataLoaderを使うオプション

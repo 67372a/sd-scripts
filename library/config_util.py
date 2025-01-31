@@ -66,6 +66,7 @@ class BaseSubsetParams:
     flip_aug: bool = False
     face_crop_aug_range: Optional[Tuple[float, float]] = None
     random_crop: bool = False
+    random_crop_padding_percent: float = 0.05
     caption_prefix: Optional[str] = None
     caption_suffix: Optional[str] = None
     caption_dropout_rate: float = 0.0
@@ -494,9 +495,11 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                 subset_blueprint.params.color_aug = False
                 subset_blueprint.params.flip_aug = False
                 subset_blueprint.params.random_crop = False
+                subset_blueprint.params.random_crop_padding_percent = 0.0
                 subset_blueprint.params.caption_dropout_rate = 0.0
                 subset_blueprint.params.caption_dropout_every_n_epochs = 0
                 subset_blueprint.params.caption_tag_dropout_rate = 0.0
+                subset_blueprint.params.shuffle_caption = False
                 subset_blueprint.params.token_warmup_step = 0
 
                 val_subsets.append(subset_klass(**asdict(subset_blueprint.params)))
@@ -535,6 +538,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
             subset_blueprint.params.color_aug = False
             subset_blueprint.params.flip_aug = False
             subset_blueprint.params.random_crop = False
+            subset_blueprint.params.random_crop_padding_percent = 0.0
             subset_blueprint.params.caption_dropout_rate = 0.0
             subset_blueprint.params.caption_dropout_every_n_epochs = 0
             subset_blueprint.params.caption_tag_dropout_rate = 0.0
@@ -603,6 +607,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
           flip_aug: {subset.flip_aug}
           face_crop_aug_range: {subset.face_crop_aug_range}
           random_crop: {subset.random_crop}
+          random_crop_padding_percent: {subset.random_crop_padding_percent}
           token_warmup_min: {subset.token_warmup_min}
           token_warmup_step: {subset.token_warmup_step}
           alpha_mask: {subset.alpha_mask}

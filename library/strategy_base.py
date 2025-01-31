@@ -421,7 +421,7 @@ class LatentsCachingStrategy:
     ) -> bool:
         raise NotImplementedError
 
-    def cache_batch_latents(self, model: Any, batch: List, flip_aug: bool, alpha_mask: bool, random_crop: bool):
+    def cache_batch_latents(self, model: Any, batch: List, flip_aug: bool, alpha_mask: bool, random_crop: bool, random_crop_padding_percent: float = 0.05):
         raise NotImplementedError
 
     def _default_is_disk_cached_latents_expected(
@@ -470,6 +470,7 @@ class LatentsCachingStrategy:
         alpha_mask: bool,
         random_crop: bool,
         multi_resolution: bool = False,
+        random_crop_padding_percent: float = 0.05,
     ):
         """
         Default implementation for cache_batch_latents. Image loading, VAE, flipping, alpha mask handling are common.
@@ -477,7 +478,7 @@ class LatentsCachingStrategy:
         from library import train_util  # import here to avoid circular import
 
         img_tensor, alpha_masks, original_sizes, crop_ltrbs = train_util.load_images_and_masks_for_caching(
-            image_infos, alpha_mask, random_crop
+            image_infos, alpha_mask, random_crop, random_crop_padding_percent
         )
         img_tensor = img_tensor.to(device=vae_device, dtype=vae_dtype)
 

@@ -426,6 +426,7 @@ class BaseSubset:
         flip_aug: bool,
         face_crop_aug_range: Optional[Tuple[float, float]],
         random_crop: bool,
+        random_crop_padding_percent: float,
         caption_dropout_rate: float,
         caption_dropout_every_n_epochs: int,
         caption_tag_dropout_rate: float,
@@ -449,6 +450,7 @@ class BaseSubset:
         self.flip_aug = flip_aug
         self.face_crop_aug_range = face_crop_aug_range
         self.random_crop = random_crop
+        self.random_crop_padding_percent = random_crop_padding_percent
         self.caption_dropout_rate = caption_dropout_rate
         self.caption_dropout_every_n_epochs = caption_dropout_every_n_epochs
         self.caption_tag_dropout_rate = caption_tag_dropout_rate
@@ -485,6 +487,7 @@ class DreamBoothSubset(BaseSubset):
         flip_aug,
         face_crop_aug_range,
         random_crop,
+        random_crop_padding_percent,
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
@@ -511,6 +514,7 @@ class DreamBoothSubset(BaseSubset):
             flip_aug,
             face_crop_aug_range,
             random_crop,
+            random_crop_padding_percent,
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
@@ -553,6 +557,7 @@ class FineTuningSubset(BaseSubset):
         flip_aug,
         face_crop_aug_range,
         random_crop,
+        random_crop_padding_percent,
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
@@ -579,6 +584,7 @@ class FineTuningSubset(BaseSubset):
             flip_aug,
             face_crop_aug_range,
             random_crop,
+            random_crop_padding_percent,
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
@@ -616,6 +622,7 @@ class ControlNetSubset(BaseSubset):
         flip_aug,
         face_crop_aug_range,
         random_crop,
+        random_crop_padding_percent,
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
@@ -642,6 +649,7 @@ class ControlNetSubset(BaseSubset):
             flip_aug,
             face_crop_aug_range,
             random_crop,
+            random_crop_padding_percent,
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
@@ -1139,6 +1147,8 @@ class BaseDataset(torch.utils.data.Dataset):
             for info in batch:
                 if info.image is not None and isinstance(info.image, Future):
                     info.image = info.image.result()  # future to image
+
+            # TODO: random_crop_padding_percent
             caching_strategy.cache_batch_latents(model, batch, cond.flip_aug, cond.alpha_mask, cond.random_crop)
 
             # remove image from memory
@@ -1276,7 +1286,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # iterate batches: batch doesn't have image, image will be loaded in cache_batch_latents and discarded
         logger.info("caching latents...")
         for condition, batch in tqdm(batches, smoothing=1, total=len(batches)):
-            cache_batch_latents(vae, cache_to_disk, batch, condition.flip_aug, condition.alpha_mask, condition.random_crop)
+            cache_batch_latents(vae, cache_to_disk, batch, condition.flip_aug, condition.alpha_mask, condition.random_crop, subset.random_crop_padding_percent)
 
     def new_cache_text_encoder_outputs(self, models: List[Any], accelerator: Accelerator):
         r"""
@@ -1506,7 +1516,7 @@ class BaseDataset(torch.utils.data.Dataset):
         nh = int(height * scale + 0.5)
         nw = int(width * scale + 0.5)
         assert nh >= self.height and nw >= self.width, f"internal error. small scale {scale}, {width}*{height}"
-        image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_AREA)
+        image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_CUBIC)
         face_cx = int(face_cx * scale + 0.5)
         face_cy = int(face_cy * scale + 0.5)
         height, width = nh, nw
@@ -1604,7 +1614,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
                 if self.enable_bucket:
                     img, original_size, crop_ltrb = trim_and_resize_if_required(
-                        subset.random_crop, img, image_info.bucket_reso, image_info.resized_size
+                        subset.random_crop, img, image_info.bucket_reso, image_info.resized_size, subset.random_crop_padding_percent
                     )
                 else:
                     if face_cx > 0:  # 顔位置情報あり
@@ -2416,6 +2426,7 @@ class ControlNetDataset(BaseDataset):
                 subset.flip_aug,
                 subset.face_crop_aug_range,
                 subset.random_crop,
+                subset.random_crop_padding_percent,
                 subset.caption_dropout_rate,
                 subset.caption_dropout_every_n_epochs,
                 subset.caption_tag_dropout_rate,
@@ -2536,7 +2547,7 @@ class ControlNetDataset(BaseDataset):
                     cond_img.shape[0] == original_size_hw[0] and cond_img.shape[1] == original_size_hw[1]
                 ), f"size of conditioning image is not match / 画像サイズが合いません: {image_info.absolute_path}"
                 cond_img = cv2.resize(
-                    cond_img, image_info.resized_size, interpolation=cv2.INTER_AREA
+                    cond_img, image_info.resized_size, interpolation=cv2.INTER_CUBIC
                 )  # INTER_AREAでやりたいのでcv2でリサイズ
 
                 # TODO support random crop
@@ -2949,29 +2960,35 @@ def load_image(image_path, alpha=False):
 
 # 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top, crop right, crop bottom)
 def trim_and_resize_if_required(
-    random_crop: bool, image: np.ndarray, reso, resized_size: Tuple[int, int]
+    random_crop: bool, image: np.ndarray, reso, resized_size: Tuple[int, int], random_crop_padding_percent=0.05
 ) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int, int, int]]:
     image_height, image_width = image.shape[0:2]
     original_size = (image_width, image_height)  # size before resize
 
     if image_width != resized_size[0] or image_height != resized_size[1]:
         # リサイズする
-        if image_width > resized_size[0] and image_height > resized_size[1]:
-            image = cv2.resize(image, resized_size, interpolation=cv2.INTER_AREA)  # INTER_AREAでやりたいのでcv2でリサイズ
+        
+        if random_crop:
+            resized_size_super = (int(resized_size[0] * (1.0 + random_crop_padding_percent)), int(resized_size[1] * (1.0 + random_crop_padding_percent)))
         else:
-            image = pil_resize(image, resized_size)
+            resized_size_super = resized_size
+
+        if image_width < resized_size_super[0] or image_height < resized_size_super[1]:
+            image = pil_resize(image, resized_size_super)
+        else:
+            image = cv2.resize(image, resized_size_super, interpolation=cv2.INTER_CUBIC)  # INTER_AREAでやりたいのでcv2でリサイズ
 
     image_height, image_width = image.shape[0:2]
 
     if image_width > reso[0]:
         trim_size = image_width - reso[0]
         p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
-        # logger.info(f"w {trim_size} {p}")
+        #print(f"w {trim_size} {p}")
         image = image[:, p : p + reso[0]]
     if image_height > reso[1]:
         trim_size = image_height - reso[1]
         p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
-        # logger.info(f"h {trim_size} {p})
+        #print(f"h {trim_size} {p}")
         image = image[p : p + reso[1]]
 
     # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
@@ -2985,7 +3002,7 @@ def trim_and_resize_if_required(
 
 # for new_cache_latents
 def load_images_and_masks_for_caching(
-    image_infos: List[ImageInfo], use_alpha_mask: bool, random_crop: bool
+    image_infos: List[ImageInfo], use_alpha_mask: bool, random_crop: bool, random_crop_padding_percent: float = 0.05,
 ) -> Tuple[torch.Tensor, List[np.ndarray], List[Tuple[int, int]], List[Tuple[int, int, int, int]]]:
     r"""
     requires image_infos to have: [absolute_path or image], bucket_reso, resized_size
@@ -3004,7 +3021,7 @@ def load_images_and_masks_for_caching(
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size)
+        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size, random_crop_padding_percent)
 
         original_sizes.append(original_size)
         crop_ltrbs.append(crop_ltrb)
@@ -3029,7 +3046,8 @@ def load_images_and_masks_for_caching(
 
 
 def cache_batch_latents(
-    vae: AutoencoderKL, cache_to_disk: bool, image_infos: List[ImageInfo], flip_aug: bool, use_alpha_mask: bool, random_crop: bool
+    vae: AutoencoderKL, cache_to_disk: bool, image_infos: List[ImageInfo], flip_aug: bool, use_alpha_mask: bool, random_crop: bool, 
+    random_crop_padding_percent: float = 0.05,
 ) -> None:
     r"""
     requires image_infos to have: absolute_path, bucket_reso, resized_size, latents_npz
@@ -3045,7 +3063,7 @@ def cache_batch_latents(
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size)
+        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size, random_crop_padding_percent)
 
         info.latents_original_size = original_size
         info.latents_crop_ltrb = crop_ltrb
