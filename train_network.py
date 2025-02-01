@@ -552,7 +552,6 @@ class NetworkTrainer:
 
                 batch["latents"] = latents
                 latents = latents.to(device=accelerator.device)
-                batch["image"] = None
 
                 if args.cache_latents:
                     vae.to("cpu")

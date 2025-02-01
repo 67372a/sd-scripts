@@ -139,7 +139,6 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
 
             batch["latents"] = latents
             latents = latents.to(device=accelerator.device)
-            batch["image"] = None
 
             if args.cache_latents:
                 vae.to("cpu")

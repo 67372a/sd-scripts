@@ -477,25 +477,33 @@ class LatentsCachingStrategy:
         """
         from library import train_util  # import here to avoid circular import
 
-        img_tensor, alpha_masks, original_sizes, crop_ltrbs = train_util.load_images_and_masks_for_caching(
+        images, alpha_masks, original_sizes, crop_ltrbs = train_util.load_images_and_masks_for_caching(
             image_infos, alpha_mask, random_crop, random_crop_padding_percent
         )
-        img_tensor = img_tensor.to(device=vae_device, dtype=vae_dtype)
 
-        with torch.no_grad():
-            latents_tensors = encode_by_vae(img_tensor).to("cpu")
-        if flip_aug:
-            img_tensor = torch.flip(img_tensor, dims=[3])
+        latents_tensors_array = []
+        flipped_latents_array = []
+        for image_tensor in images:
+            batch_image_tensor = image_tensor.unsqueeze(0).to(device=vae_device, dtype=vae_dtype)
             with torch.no_grad():
-                flipped_latents = encode_by_vae(img_tensor).to("cpu")
-        else:
-            flipped_latents = [None] * len(latents_tensors)
+                latent = encode_by_vae(batch_image_tensor).to("cpu")
+
+            if flip_aug:
+                flipped_image_tensor = torch.flip(batch_image_tensor, dims=[3])
+                with torch.no_grad():
+                    flipped_latent = encode_by_vae(flipped_image_tensor).to("cpu")
+                    
+                flipped_latents_array.append(flipped_latent.squeeze(0))
+            else:
+                flipped_latents_array.append(None)
+
+            latents_tensors_array.append(latent.squeeze(0))
 
         # for info, latents, flipped_latent, alpha_mask in zip(image_infos, latents_tensors, flipped_latents, alpha_masks):
         for i in range(len(image_infos)):
             info = image_infos[i]
-            latents = latents_tensors[i]
-            flipped_latent = flipped_latents[i]
+            latents = latents_tensors_array[i]
+            flipped_latent = flipped_latents_array[i]
             alpha_mask = alpha_masks[i]
             original_size = original_sizes[i]
             crop_ltrb = crop_ltrbs[i]

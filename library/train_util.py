@@ -1596,13 +1596,15 @@ class BaseDataset(torch.utils.data.Dataset):
                 else:
                     latents = image_info.latents_flipped
                     alpha_mask = None if image_info.alpha_mask is None else torch.flip(image_info.alpha_mask, [1])
-                
+
                 if subset.random_crop:
                     bucket_width = image_info.bucket_reso[0] // 8
                     bucket_height = image_info.bucket_reso[1] // 8
                 
                     width_start = random.randint(0, latents.shape[2] - bucket_width)
+                    #print(f"w {latents.shape[2] - bucket_width} {width_start}")
                     height_start = random.randint(0, latents.shape[1] - bucket_height)
+                    #print(f"h {latents.shape[1] - bucket_height} {height_start}")
                     latents = latents[:, height_start : height_start + bucket_height, width_start : width_start + bucket_width]
                     if alpha_mask is not None:
                         alpha_mask = alpha_mask[:, height_start : height_start + bucket_height, width_start : width_start + bucket_width]
@@ -2987,18 +2989,16 @@ def trim_and_resize_if_required(
     image_height, image_width = image.shape[0:2]
     original_size = (image_width, image_height)  # size before resize
 
+    if random_crop:
+        resized_size = (int(resized_size[0] * (1.0 + random_crop_padding_percent)), int(resized_size[1] * (1.0 + random_crop_padding_percent)))
+
     if image_width != resized_size[0] or image_height != resized_size[1]:
         # リサイズする
-        
-        if random_crop:
-            resized_size_super = (int(resized_size[0] * (1.0 + random_crop_padding_percent)), int(resized_size[1] * (1.0 + random_crop_padding_percent)))
-        else:
-            resized_size_super = resized_size
 
-        if image_width < resized_size_super[0] or image_height < resized_size_super[1]:
-            image = pil_resize(image, resized_size_super)
+        if image_width < resized_size[0] or image_height < resized_size[1]:
+            image = pil_resize(image, resized_size)
         else:
-            image = cv2.resize(image, resized_size_super, interpolation=cv2.INTER_CUBIC)  # INTER_AREAでやりたいのでcv2でリサイズ
+            image = cv2.resize(image, resized_size, interpolation=cv2.INTER_CUBIC)  # INTER_AREAでやりたいのでcv2でリサイズ
 
     image_height, image_width = image.shape[0:2]
 
@@ -3017,34 +3017,27 @@ def trim_and_resize_if_required(
         # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
         # I have no idea how to reflect the cropped value in crop left/top in the case of random crop
 
-        crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
-
         assert image.shape[0] == reso[1] and image.shape[1] == reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
-        return image, original_size, crop_ltrb
 
     else:
-        # Latent will not be randomly cropped at this point, center crop at random_crop_padding_percent percent more for consistency
+        # Latent will not be randomly cropped at this point
 
-        if random_crop and random_crop_padding_percent > 0.0:
-            adjusted_reso = (int(reso[0] * (1.0 + random_crop_padding_percent)), int(reso[1] * (1.0 + random_crop_padding_percent)))
-        else:
-            adjusted_reso = reso
-
-        if image_width > adjusted_reso[0]:
-            trim_size = image_width - adjusted_reso[0]
-            p = trim_size // 2
-            image = image[:, p : p + adjusted_reso[0]]
-        if image_height > adjusted_reso[1]:
-            trim_size = image_height - adjusted_reso[1]
-            p = trim_size // 2
-            #print(f"h {trim_size} {p}")
-            image = image[p : p + adjusted_reso[1]]
+        if not random_crop:
+            # center crop and done
+            if image_width > reso[0]:
+                trim_size = image_width - reso[0]
+                p = trim_size // 2
+                image = image[:, p : p + reso[0]]
+            if image_height > reso[1]:
+                trim_size = image_height - reso[1]
+                p = trim_size // 2
+                #print(f"h {trim_size} {p}")
+                image = image[p : p + reso[1]]
 
 
-        crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
+    crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
 
-        assert image.shape[0] == adjusted_reso[1] and image.shape[1] == adjusted_reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
-        return image, original_size, crop_ltrb
+    return image, original_size, crop_ltrb
 
 # for new_cache_latents
 def load_images_and_masks_for_caching(
@@ -3067,7 +3060,8 @@ def load_images_and_masks_for_caching(
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, 
+        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, 
+                                                                      image, 
                                                                       info.bucket_reso, 
                                                                       info.resized_size, 
                                                                       random_crop_padding_percent, 
@@ -3091,7 +3085,7 @@ def load_images_and_masks_for_caching(
         image = IMAGE_TRANSFORMS(image)
         images.append(image)
 
-    img_tensor = torch.stack(images, dim=0)
+    img_tensor = images #torch.stack(images, dim=0)
     return img_tensor, alpha_masks, original_sizes, crop_ltrbs
 
 
@@ -3138,33 +3132,41 @@ def cache_batch_latents(
         image = IMAGE_TRANSFORMS(image)
         images.append(image)
 
-    img_tensors = torch.stack(images, dim=0)
-    img_tensors = img_tensors.to(device=vae.device, dtype=vae.dtype)
+        latents_array = []
+        flipped_latents_array = []
+        for image_tensor in images:
+            batch_image_tensor = image_tensor.unsqueeze(0).to(device=vae.device, dtype=vae.dtype)
+            with torch.no_grad():
+                latent = vae.encode(batch_image_tensor).latent_dist.sample().to("cpu")
+                if torch.isnan(latent).any():
+                    raise RuntimeError(f"NaN detected in latents: {info.absolute_path}")
 
-    with torch.no_grad():
-        latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
+            if flip_aug:
+                flipped_image_tensor = torch.flip(batch_image_tensor, dims=[3])
+                with torch.no_grad():
+                    flipped_latent = vae.encode(flipped_image_tensor).latent_dist.sample().to("cpu")
+                    if torch.isnan(flipped_latent).any():
+                        raise RuntimeError(f"NaN detected in latents: {info.absolute_path}")
+                    
+                flipped_latents_array.append(flipped_latent.squeeze(0))
+            latents_array.append(latent.squeeze(0))
 
-    if flip_aug:
-        img_tensors = torch.flip(img_tensors, dims=[3])
-        with torch.no_grad():
-            flipped_latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
-    else:
-        flipped_latents = [None] * len(latents)
+    #else:
+    #    img_tensors = torch.stack(images, dim=0)
+    #    img_tensors = img_tensors.to(device=vae.device, dtype=vae.dtype)
 
-    for info, latent, flipped_latent, alpha_mask in zip(image_infos, latents, flipped_latents, alpha_masks):
-        # check NaN
-        if torch.isnan(latents).any() or (flipped_latent is not None and torch.isnan(flipped_latent).any()):
-            raise RuntimeError(f"NaN detected in latents: {info.absolute_path}")
+    #with torch.no_grad():
+    #    latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
 
+    #if flip_aug:
+    #    img_tensors = torch.flip(img_tensors, dims=[3])
+    #    with torch.no_grad():
+    #        flipped_latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
+    #else:
+    #    flipped_latents = [None] * len(latents)
+
+    for info, latent, flipped_latent, alpha_mask in zip(image_infos, latents_array, flipped_latents_array, alpha_masks):
         if cache_to_disk:
-            # save_latents_to_disk(
-            #     info.latents_npz,
-            #     latent,
-            #     info.latents_original_size,
-            #     info.latents_crop_ltrb,
-            #     flipped_latent,
-            #     alpha_mask,
-            # )
             pass
         else:
             info.latents = latent
