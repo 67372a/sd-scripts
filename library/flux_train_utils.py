@@ -656,16 +656,10 @@ def add_flux_train_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--guidance_scale",
         type=float,
-        default=3.5,
+        default=1,
         help="the FLUX.1 dev variant is a guidance distilled model",
     )
 
-    parser.add_argument(
-        "--sigmoid_scale",
-        type=float,
-        default=1.0,
-        help='Scale factor for sigmoid timestep sampling (only used when timestep-sampling is "sigmoid"). / sigmoidタイムステップサンプリングの倍率（timestep-samplingが"sigmoid"の場合のみ有効）。',
-    )
     parser.add_argument(
         "--model_prediction_type",
         choices=["raw", "additive", "sigma_scaled"],
@@ -674,12 +668,6 @@ def add_flux_train_arguments(parser: argparse.ArgumentParser):
         "raw (use as is), additive (add to noisy input), sigma_scaled (apply sigma scaling)."
         " / モデル予測の解釈と処理方法："
         "raw（そのまま使用）、additive（ノイズ入力に加算）、sigma_scaled（シグマスケーリングを適用）。",
-    )
-    parser.add_argument(
-        "--discrete_flow_shift",
-        type=float,
-        default=3.0,
-        help="Discrete flow shift for the Euler Discrete Scheduler, default is 3.0. / Euler Discrete Schedulerの離散フローシフト、デフォルトは3.0。",
     )
 
     parser.add_argument(
