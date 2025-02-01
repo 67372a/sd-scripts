@@ -413,8 +413,7 @@ class Sd3LatentsCachingStrategy(LatentsCachingStrategy):
         vae_dtype = vae.dtype
 
         self._default_cache_batch_latents(
-            encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop, multi_resolution=True, 
-            random_crop_padding_percent=random_crop_padding_percent
+            encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop, multi_resolution=True
         )
 
         if not train_util.HIGH_VRAM:

@@ -122,28 +122,13 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
         if "latents" in batch and batch["latents"] is not None:
             latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
         else:
-            # Work around pending fix for caching validation latents
-            if args.cache_latents:
-                clean_memory_on_device(accelerator.device)
-                vae.to(accelerator.device, dtype=vae_dtype)
-                vae.requires_grad_(False)
-                vae.eval()
-
             # latentに変換
-            latents = vae.encode(batch["images"].to(device=vae.device, dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype)
+            latents = vae.encode(batch["images"].to(vae_dtype)).latent_dist.sample().to(weight_dtype)
 
             # NaNが含まれていれば警告を表示し0に置き換える
             if torch.any(torch.isnan(latents)):
                 accelerator.print("NaN found in latents, replacing with zeros")
                 latents = torch.nan_to_num(latents, 0, out=latents)
-
-            batch["latents"] = latents
-            latents = latents.to(device=accelerator.device)
-            batch["image"] = None
-
-            if args.cache_latents:
-                vae.to("cpu")
-                clean_memory_on_device(accelerator.device)
         latents = latents * sdxl_model_util.VAE_SCALE_FACTOR
 
         text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
@@ -288,7 +273,7 @@ def train(args):
     deepspeed_utils.prepare_deepspeed_args(args)
     setup_logging(args, reset=True)
 
-    if args.disable_cuda_reduced_precision_operations:
+    if bool(args.disable_cuda_reduced_precision_operations) if args.disable_cuda_reduced_precision_operations else False:
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False
         torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction=False
         torch.backends.cuda.matmul.allow_tf32=False
@@ -392,11 +377,11 @@ def train(args):
     if cache_latents:
         assert (
             train_dataset_group.is_latent_cacheable()
-        ), "when caching latents, color_aug cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+        ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
         if val_dataset_group is not None:
             assert (
                 val_dataset_group.is_latent_cacheable()
-            ), "when caching validation latents, color_aug cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+            ), "when caching validation latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
 
     if args.cache_text_encoder_outputs:
         assert (

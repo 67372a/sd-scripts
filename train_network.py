@@ -526,7 +526,7 @@ class NetworkTrainer:
     def plot_dynamic_loss_weighting_check(self, args, global_step):
         return args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps)
 
-    def process_val_batch(self, network, batch, tokenize_strategy, text_encoders, 
+    def process_val_batch(self, network, batch, tokenizers, tokenize_strategy, text_encoders, 
                           text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, 
                           accelerator, args, timesteps_list: list = [10, 350, 500, 650, 990], train_text_encoder: bool = True):
         total_loss = 0.0 
@@ -534,29 +534,14 @@ class NetworkTrainer:
             if "latents" in batch and batch["latents"] is not None:
                 latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
             else:
-                # Work around pending fix for caching validation latents
-                if args.cache_latents:
-                    clean_memory_on_device(accelerator.device)
-                    vae.to(accelerator.device, dtype=vae_dtype)
-                    vae.requires_grad_(False)
-                    vae.eval()
-
                 # latentに変換
-                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(device=vae.device, dtype=vae_dtype))
+                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
                 latents = latents.to(dtype=weight_dtype)
 
                 # NaNが含まれていれば警告を表示し0に置き換える
                 if torch.any(torch.isnan(latents)):
                     accelerator.print("NaN found in latents, replacing with zeros")
                     latents = torch.nan_to_num(latents, 0, out=latents)
-
-                batch["latents"] = latents
-                latents = latents.to(device=accelerator.device)
-                batch["image"] = None
-
-                if args.cache_latents:
-                    vae.to("cpu")
-                    clean_memory_on_device(accelerator.device)
 
             latents = self.shift_scale_latents(args, latents)
 
@@ -706,7 +691,7 @@ class NetworkTrainer:
                 batch = next(cyclic_val_dataloader)
                 val_dataloader_state = random.getstate()
                 random.setstate(val_original_state)
-                loss = self.process_val_batch(network, batch, tokenize_strategy, text_encoders, 
+                loss = self.process_val_batch(network, batch, tokenizers, tokenize_strategy, text_encoders, 
                                               text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, 
                                               weight_dtype, accelerator, args, timesteps_list=timesteps_list, 
                                               train_text_encoder=train_text_encoder)
@@ -734,7 +719,7 @@ class NetworkTrainer:
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
 
-        if args.disable_cuda_reduced_precision_operations:
+        if bool(args.disable_cuda_reduced_precision_operations) if args.disable_cuda_reduced_precision_operations else False:
             torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction=False
             torch.backends.cuda.matmul.allow_tf32=False
@@ -809,10 +794,6 @@ class NetworkTrainer:
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
         collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
 
-        if val_dataset_group is not None:
-            val_ds_for_collator = val_dataset_group if args.max_data_loader_n_workers == 0 else None
-            val_ds_collator = train_util.collator_class(current_epoch, current_step, val_ds_for_collator)
-
         if args.debug_dataset:
             train_dataset_group.set_current_strategies()  # dasaset needs to know the strategies explicitly
             train_util.debug_dataset(train_dataset_group)
@@ -826,7 +807,11 @@ class NetworkTrainer:
         if cache_latents:
             assert (
                 train_dataset_group.is_latent_cacheable()
-            ), "when caching latents, color_aug cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+            ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+            if val_dataset_group is not None:
+                assert (
+                    val_dataset_group.is_latent_cacheable()
+                ), "when caching validation latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
               
         self.assert_extra_args(args, train_dataset_group)
         if val_dataset_group is not None:
@@ -1023,19 +1008,16 @@ class NetworkTrainer:
             pin_memory=args.pin_data_loader_memory or args.pin_memory,
             persistent_workers=args.persistent_data_loader_workers,
         )
-
-        if val_dataset_group is not None:
-            val_dataloader = torch.utils.data.DataLoader(
-                val_dataset_group,
-                shuffle=False,
-                batch_size=1,
-                collate_fn=val_ds_collator,
-                num_workers=n_workers,
-                pin_memory=args.pin_data_loader_memory or args.pin_memory,
-                persistent_workers=args.persistent_data_loader_workers,
-            )
-        else:
-            val_dataloader = None
+        
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset_group if val_dataset_group is not None else [],
+            shuffle=False,
+            batch_size=1,
+            collate_fn=collator,
+            num_workers=n_workers,
+            pin_memory=args.pin_data_loader_memory or args.pin_memory,
+            persistent_workers=args.persistent_data_loader_workers,
+        )
 
         # 学習ステップ数を計算する
         if args.max_train_epochs is not None:
@@ -1713,12 +1695,7 @@ class NetworkTrainer:
             optimizer_eval_fn()
             self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             if train_util.calculate_val_loss_check(args, global_step, 0, val_dataloader, train_dataloader):
-                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, 
-                                                                                       val_loss_recorder, val_dataloader, 
-                                                                                       cyclic_val_dataloader, network, 
-                                                                                       tokenizers, tokenize_strategy, text_encoders, 
-                                                                                       text_encoding_strategy, unet, vae, noise_scheduler, 
-                                                                                       vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
+                current_val_loss, average_val_loss, val_logs = self.calculate_val_loss(global_step, 0, train_dataloader, val_loss_recorder, val_dataloader, cyclic_val_dataloader, network, tokenizers, tokenize_strategy, text_encoders, text_encoding_strategy, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder)
             #Switch network to train mode
             optimizer_train_fn()
             network.train()

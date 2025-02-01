@@ -48,14 +48,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from library.device_utils import init_ipex, clean_memory_on_device
 from library.strategy_base import LatentsCachingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy, TextEncodingStrategy
 
-
-
 init_ipex()
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 from torchvision import transforms
-from torchvision.transforms import InterpolationMode
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextModelWithProjection
 import transformers
 from diffusers.optimization import (
@@ -1095,7 +1092,7 @@ class BaseDataset(torch.utils.data.Dataset):
         )
 
     def is_latent_cacheable(self):
-        return all([not subset.color_aug for subset in self.subsets])
+        return all([not subset.color_aug and not subset.random_crop for subset in self.subsets])
 
     def is_text_encoder_output_cacheable(self):
         return all(
@@ -1124,12 +1121,11 @@ class BaseDataset(torch.utils.data.Dataset):
 
         # split by resolution and some conditions
         class Condition:
-            def __init__(self, reso, flip_aug, alpha_mask, random_crop, random_crop_padding_percent):
+            def __init__(self, reso, flip_aug, alpha_mask, random_crop):
                 self.reso = reso
                 self.flip_aug = flip_aug
                 self.alpha_mask = alpha_mask
                 self.random_crop = random_crop
-                self.random_crop_padding_percent = random_crop_padding_percent
 
             def __eq__(self, other):
                 return (
@@ -1137,7 +1133,6 @@ class BaseDataset(torch.utils.data.Dataset):
                     and self.flip_aug == other.flip_aug
                     and self.alpha_mask == other.alpha_mask
                     and self.random_crop == other.random_crop
-                    and self.random_crop_padding_percent == other.random_crop_padding_percent
                 )
 
         batch: List[ImageInfo] = []
@@ -1153,7 +1148,8 @@ class BaseDataset(torch.utils.data.Dataset):
                 if info.image is not None and isinstance(info.image, Future):
                     info.image = info.image.result()  # future to image
 
-            caching_strategy.cache_batch_latents(model, batch, cond.flip_aug, cond.alpha_mask, cond.random_crop, cond.random_crop_padding_percent)
+            # TODO: random_crop_padding_percent
+            caching_strategy.cache_batch_latents(model, batch, cond.flip_aug, cond.alpha_mask, cond.random_crop)
 
             # remove image from memory
             for info in batch:
@@ -1193,7 +1189,7 @@ class BaseDataset(torch.utils.data.Dataset):
                         continue
 
                 # if batch is not empty and condition is changed, flush the batch. Note that current_condition is not None if batch is not empty
-                condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop, subset.random_crop_padding_percent)
+                condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop)
                 if len(batch) > 0 and current_condition != condition:
                     submit_batch(batch, current_condition)
                     batch = []
@@ -1228,12 +1224,11 @@ class BaseDataset(torch.utils.data.Dataset):
 
         # split by resolution and some conditions
         class Condition:
-            def __init__(self, reso, flip_aug, alpha_mask, random_crop, random_crop_padding_percent):
+            def __init__(self, reso, flip_aug, alpha_mask, random_crop):
                 self.reso = reso
                 self.flip_aug = flip_aug
                 self.alpha_mask = alpha_mask
                 self.random_crop = random_crop
-                self.random_crop_padding_percent = random_crop_padding_percent
 
             def __eq__(self, other):
                 return (
@@ -1241,7 +1236,6 @@ class BaseDataset(torch.utils.data.Dataset):
                     and self.flip_aug == other.flip_aug
                     and self.alpha_mask == other.alpha_mask
                     and self.random_crop == other.random_crop
-                    and self.random_crop_padding_percent == other.random_crop_padding_percent
                 )
 
         batches: List[Tuple[Condition, List[ImageInfo]]] = []
@@ -1269,7 +1263,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     continue
 
             # if batch is not empty and condition is changed, flush the batch. Note that current_condition is not None if batch is not empty
-            condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop, subset.random_crop_padding_percent)
+            condition = Condition(info.bucket_reso, subset.flip_aug, subset.alpha_mask, subset.random_crop)
             if len(batch) > 0 and current_condition != condition:
                 batches.append((current_condition, batch))
                 batch = []
@@ -1292,7 +1286,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # iterate batches: batch doesn't have image, image will be loaded in cache_batch_latents and discarded
         logger.info("caching latents...")
         for condition, batch in tqdm(batches, smoothing=1, total=len(batches)):
-            cache_batch_latents(vae, cache_to_disk, batch, condition.flip_aug, condition.alpha_mask, condition.random_crop, condition.random_crop_padding_percent)
+            cache_batch_latents(vae, cache_to_disk, batch, condition.flip_aug, condition.alpha_mask, condition.random_crop, subset.random_crop_padding_percent)
 
     def new_cache_text_encoder_outputs(self, models: List[Any], accelerator: Accelerator):
         r"""
@@ -1596,16 +1590,6 @@ class BaseDataset(torch.utils.data.Dataset):
                 else:
                     latents = image_info.latents_flipped
                     alpha_mask = None if image_info.alpha_mask is None else torch.flip(image_info.alpha_mask, [1])
-                
-                if subset.random_crop:
-                    bucket_width = image_info.bucket_reso[0] // 8
-                    bucket_height = image_info.bucket_reso[1] // 8
-                
-                    width_start = random.randint(0, latents.shape[2] - bucket_width)
-                    height_start = random.randint(0, latents.shape[1] - bucket_height)
-                    latents = latents[:, height_start : height_start + bucket_height, width_start : width_start + bucket_width]
-                    if alpha_mask is not None:
-                        alpha_mask = alpha_mask[:, height_start : height_start + bucket_height, width_start : width_start + bucket_width]
 
                 image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
@@ -1791,7 +1775,6 @@ class BaseDataset(torch.utils.data.Dataset):
         else:
             images = None
         example["images"] = images
-
 
         example["latents"] = torch.stack(latents_list) if latents_list[0] is not None else None
         example["captions"] = captions
@@ -2274,7 +2257,7 @@ class FineTuningDataset(BaseDataset):
                 image_info = ImageInfo(image_key, subset.num_repeats, caption, False, abs_path)
                 image_info.image_size = img_md.get("train_resolution")
 
-                if not subset.color_aug:
+                if not subset.color_aug and not subset.random_crop:
                     # if npz exists, use them
                     image_info.latents_npz, image_info.latents_npz_flipped = self.image_key_to_npz_file(subset, image_key)
 
@@ -2288,7 +2271,7 @@ class FineTuningDataset(BaseDataset):
             self.subsets.append(subset)
 
         # check existence of all npz files
-        use_npz_latents = all([not (subset.color_aug) for subset in self.subsets])
+        use_npz_latents = all([not (subset.color_aug or subset.random_crop) for subset in self.subsets])
         if use_npz_latents:
             flip_aug_in_subset = False
             npz_any = False
@@ -2977,12 +2960,7 @@ def load_image(image_path, alpha=False):
 
 # 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top, crop right, crop bottom)
 def trim_and_resize_if_required(
-    random_crop: bool, 
-    image: np.ndarray, 
-    reso, 
-    resized_size: Tuple[int, int], 
-    random_crop_padding_percent:float = 0.05,
-    cache_latents: bool = False,
+    random_crop: bool, image: np.ndarray, reso, resized_size: Tuple[int, int], random_crop_padding_percent=0.05
 ) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int, int, int]]:
     image_height, image_width = image.shape[0:2]
     original_size = (image_width, image_height)  # size before resize
@@ -3002,49 +2980,25 @@ def trim_and_resize_if_required(
 
     image_height, image_width = image.shape[0:2]
 
-    if not cache_latents:
-        if image_width > reso[0]:
-            trim_size = image_width - reso[0]
-            p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
-            #print(f"w {trim_size} {p}")
-            image = image[:, p : p + reso[0]]
-        if image_height > reso[1]:
-            trim_size = image_height - reso[1]
-            p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
-            #print(f"h {trim_size} {p}")
-            image = image[p : p + reso[1]]
+    if image_width > reso[0]:
+        trim_size = image_width - reso[0]
+        p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
+        #print(f"w {trim_size} {p}")
+        image = image[:, p : p + reso[0]]
+    if image_height > reso[1]:
+        trim_size = image_height - reso[1]
+        p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
+        #print(f"h {trim_size} {p}")
+        image = image[p : p + reso[1]]
 
-        # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
-        # I have no idea how to reflect the cropped value in crop left/top in the case of random crop
+    # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
+    # I have no idea how to reflect the cropped value in crop left/top in the case of random crop
 
-        crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
+    crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
 
-        assert image.shape[0] == reso[1] and image.shape[1] == reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
-        return image, original_size, crop_ltrb
+    assert image.shape[0] == reso[1] and image.shape[1] == reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
+    return image, original_size, crop_ltrb
 
-    else:
-        # Latent will not be randomly cropped at this point, center crop at random_crop_padding_percent percent more for consistency
-
-        if random_crop and random_crop_padding_percent > 0.0:
-            adjusted_reso = (int(reso[0] * (1.0 + random_crop_padding_percent)), int(reso[1] * (1.0 + random_crop_padding_percent)))
-        else:
-            adjusted_reso = reso
-
-        if image_width > adjusted_reso[0]:
-            trim_size = image_width - adjusted_reso[0]
-            p = trim_size // 2
-            image = image[:, p : p + adjusted_reso[0]]
-        if image_height > adjusted_reso[1]:
-            trim_size = image_height - adjusted_reso[1]
-            p = trim_size // 2
-            #print(f"h {trim_size} {p}")
-            image = image[p : p + adjusted_reso[1]]
-
-
-        crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
-
-        assert image.shape[0] == adjusted_reso[1] and image.shape[1] == adjusted_reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
-        return image, original_size, crop_ltrb
 
 # for new_cache_latents
 def load_images_and_masks_for_caching(
@@ -3067,11 +3021,7 @@ def load_images_and_masks_for_caching(
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, 
-                                                                      info.bucket_reso, 
-                                                                      info.resized_size, 
-                                                                      random_crop_padding_percent, 
-                                                                      cache_latents=True)
+        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size, random_crop_padding_percent)
 
         original_sizes.append(original_size)
         crop_ltrbs.append(crop_ltrb)
@@ -3113,12 +3063,7 @@ def cache_batch_latents(
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, 
-                                                                      image, 
-                                                                      info.bucket_reso, 
-                                                                      info.resized_size, 
-                                                                      random_crop_padding_percent,
-                                                                      cache_latents=True)
+        image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size, random_crop_padding_percent)
 
         info.latents_original_size = original_size
         info.latents_crop_ltrb = crop_ltrb
