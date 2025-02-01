@@ -122,13 +122,28 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
         if "latents" in batch and batch["latents"] is not None:
             latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
         else:
+            # Work around pending fix for caching validation latents
+            if args.cache_latents:
+                clean_memory_on_device(accelerator.device)
+                vae.to(accelerator.device, dtype=vae_dtype)
+                vae.requires_grad_(False)
+                vae.eval()
+
             # latentに変換
-            latents = vae.encode(batch["images"].to(vae_dtype)).latent_dist.sample().to(weight_dtype)
+            latents = vae.encode(batch["images"].to(device=vae.device, dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype)
 
             # NaNが含まれていれば警告を表示し0に置き換える
             if torch.any(torch.isnan(latents)):
                 accelerator.print("NaN found in latents, replacing with zeros")
                 latents = torch.nan_to_num(latents, 0, out=latents)
+
+            batch["latents"] = latents
+            latents = latents.to(device=accelerator.device)
+
+            if args.cache_latents:
+                vae.to("cpu")
+                clean_memory_on_device(accelerator.device)
+
         latents = latents * sdxl_model_util.VAE_SCALE_FACTOR
 
         text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
@@ -362,6 +377,9 @@ def train(args):
     current_step = Value("i", 0)
     ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
     collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
+    if val_dataset_group is not None:
+        val_ds_for_collator = val_dataset_group if args.max_data_loader_n_workers == 0 else None
+        val_collator = train_util.collator_class(current_epoch, current_step, val_ds_for_collator)
 
     train_dataset_group.verify_bucket_reso_steps(32)
 
@@ -625,15 +643,16 @@ def train(args):
         persistent_workers=args.persistent_data_loader_workers,
     )
 
-    val_dataloader = torch.utils.data.DataLoader(
-        val_dataset_group if val_dataset_group is not None else [],
-        shuffle=False,
-        batch_size=1,
-        collate_fn=collator,
-        num_workers=n_workers,
-        pin_memory=args.pin_data_loader_memory or args.pin_memory,
-        persistent_workers=args.persistent_data_loader_workers,
-    )
+    if val_dataset_group is not None:
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset_group,
+            shuffle=False,
+            batch_size=1,
+            collate_fn=val_collator,
+            num_workers=n_workers,
+            pin_memory=args.pin_data_loader_memory or args.pin_memory,
+            persistent_workers=args.persistent_data_loader_workers,
+        )
 
     # 学習ステップ数を計算する
     if args.max_train_epochs is not None:

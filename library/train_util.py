@@ -2965,18 +2965,16 @@ def trim_and_resize_if_required(
     image_height, image_width = image.shape[0:2]
     original_size = (image_width, image_height)  # size before resize
 
+    if random_crop:
+        resized_size = (int(resized_size[0] * (1.0 + random_crop_padding_percent)), int(resized_size[1] * (1.0 + random_crop_padding_percent)))
+
     if image_width != resized_size[0] or image_height != resized_size[1]:
         # リサイズする
-        
-        if random_crop:
-            resized_size_super = (int(resized_size[0] * (1.0 + random_crop_padding_percent)), int(resized_size[1] * (1.0 + random_crop_padding_percent)))
-        else:
-            resized_size_super = resized_size
 
-        if image_width < resized_size_super[0] or image_height < resized_size_super[1]:
-            image = pil_resize(image, resized_size_super)
+        if image_width < resized_size[0] or image_height < resized_size[1]:
+            image = pil_resize(image, resized_size)
         else:
-            image = cv2.resize(image, resized_size_super, interpolation=cv2.INTER_CUBIC)  # INTER_AREAでやりたいのでcv2でリサイズ
+            image = cv2.resize(image, resized_size, interpolation=cv2.INTER_CUBIC)  # INTER_AREAでやりたいのでcv2でリサイズ
 
     image_height, image_width = image.shape[0:2]
 
