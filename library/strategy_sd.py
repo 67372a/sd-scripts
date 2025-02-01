@@ -165,7 +165,8 @@ class SdSdxlLatentsCachingStrategy(LatentsCachingStrategy):
         vae_device = vae.device
         vae_dtype = vae.dtype
 
-        self._default_cache_batch_latents(encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop, random_crop_padding_percent)
+        self._default_cache_batch_latents(encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop, 
+                                          random_crop_padding_percent=random_crop_padding_percent)
 
         if not train_util.HIGH_VRAM:
             train_util.clean_memory_on_device(vae.device)
