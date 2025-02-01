@@ -436,7 +436,7 @@ class GradualLatent:
     def apply_unshark_mask(self, x: torch.Tensor):
         if self.gaussian_blur_ksize is None:
             return x
-        blurred = transforms.functional.gaussian_blur(x, self.gaussian_blur_ksize, self.gaussian_blur_sigma)
+        blurred = transforms.v2.functional.gaussian_blur(x, self.gaussian_blur_ksize, self.gaussian_blur_sigma)
         # mask = torch.sigmoid((x - blurred) * self.gaussian_blur_strength)
         mask = (x - blurred) * self.gaussian_blur_strength
         sharpened = x + mask

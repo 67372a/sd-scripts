@@ -141,10 +141,11 @@ try:
 except:
     pass
 
-IMAGE_TRANSFORMS = transforms.Compose(
+IMAGE_TRANSFORMS = transforms.v2.Compose(
     [
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
+        transforms.v2.ToImage(), 
+        transforms.v2.ToDtype(torch.float32, scale=True),
+        transforms.v2.Normalize([0.5], [0.5]),
     ]
 )
 
@@ -7340,7 +7341,7 @@ class ImageLoadingDataset(torch.utils.data.Dataset):
         try:
             image = Image.open(img_path).convert("RGB")
             # convert to tensor temporarily so dataloader will accept it
-            tensor_pil = transforms.functional.pil_to_tensor(image)
+            tensor_pil = transforms.v2.functional.functional.pil_to_tensor(image)
         except Exception as e:
             logger.error(f"Could not load image path / 画像を読み込めません: {img_path}, error: {e}")
             return None

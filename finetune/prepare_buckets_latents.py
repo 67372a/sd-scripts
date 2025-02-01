@@ -27,10 +27,11 @@ logger = logging.getLogger(__name__)
 
 DEVICE = get_preferred_device()
 
-IMAGE_TRANSFORMS = transforms.Compose(
+IMAGE_TRANSFORMS = transforms.v2.Compose(
     [
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
+        transforms.v2.ToImage(), 
+        transforms.v2.ToDtype(torch.float32, scale=True),
+        transforms.v2.Normalize([0.5], [0.5]),
     ]
 )
 
