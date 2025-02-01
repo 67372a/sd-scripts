@@ -4257,7 +4257,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
 
     parser.add_argument(
         "--timestep_sampling",
-        choices=["uniform", "sigmoid", "shift", "flux_shift"],
+        choices=["uniform", "sigma", "sigmoid", "shift", "flux_shift"],
         default="uniform",
         help="Method to sample timesteps: uniform random, sigmoid of random normal, shift of sigmoid and FLUX.1 shifting."
         " / タイムステップをサンプリングする方法：random uniform、random normalのsigmoid、sigmoidのシフト、FLUX.1のシフト。",
