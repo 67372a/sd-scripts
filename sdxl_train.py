@@ -396,10 +396,6 @@ def train(args):
         assert (
             train_dataset_group.is_latent_cacheable()
         ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
-        if val_dataset_group is not None:
-            assert (
-                val_dataset_group.is_latent_cacheable()
-            ), "when caching validation latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
 
     if args.cache_text_encoder_outputs:
         assert (
@@ -468,9 +464,10 @@ def train(args):
 
     # 学習を準備する
     if cache_latents or val_dataset_group is not None:
-        vae.to(accelerator.device, dtype=vae_dtype)
-        vae.requires_grad_(False)
-        vae.eval()
+        if cache_latents:
+            vae.to(accelerator.device, dtype=vae_dtype)
+            vae.requires_grad_(False)
+            vae.eval()
 
         if cache_latents:
             train_dataset_group.new_cache_latents(vae, accelerator)
@@ -478,8 +475,10 @@ def train(args):
         if val_dataset_group is not None:
             print("Caching validation latents...")
             val_dataset_group.new_cache_latents(vae, accelerator)
-        vae.to("cpu")
-        clean_memory_on_device(accelerator.device)
+
+        if cache_latents:
+            vae.to("cpu")
+            clean_memory_on_device(accelerator.device)
 
         accelerator.wait_for_everyone()
 
