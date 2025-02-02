@@ -464,10 +464,9 @@ def train(args):
 
     # 学習を準備する
     if cache_latents or val_dataset_group is not None:
-        if cache_latents:
-            vae.to(accelerator.device, dtype=vae_dtype)
-            vae.requires_grad_(False)
-            vae.eval()
+        vae.to(accelerator.device, dtype=vae_dtype)
+        vae.requires_grad_(False)
+        vae.eval()
 
         if cache_latents:
             train_dataset_group.new_cache_latents(vae, accelerator)
