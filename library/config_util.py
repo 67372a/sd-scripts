@@ -185,6 +185,7 @@ class ConfigSanitizer:
         "flip_aug": bool,
         "num_repeats": int,
         "random_crop": bool,
+        "random_crop_padding_percent": float,
         "shuffle_caption": bool,
         "shuffle_caption_sigma": int,
         "keep_tokens": int,
