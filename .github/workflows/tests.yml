@@ -40,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: |
           # Pre-install torch to pin version (requirements.txt has dependencies like transformers which requires pytorch)
-          pip install dadaptation==3.2 torch==${{ matrix.pytorch-version }} torchvision==0.21.0 pytest==8.3.4
+          pip install dadaptation==3.2 torch==${{ matrix.pytorch-version }} torchvision==0.20.1 pytest==8.3.4
           pip install -r requirements.txt
 
       - name: Test with pytest
