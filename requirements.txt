@@ -1,5 +1,5 @@
-torch==2.6.0 --extra-index-url https://download.pytorch.org/whl/cu126
-torchvision==0.21.0 --extra-index-url https://download.pytorch.org/whl/cu126
+#torch==2.6.0 --extra-index-url https://download.pytorch.org/whl/cu126
+#torchvision==0.21.0 --extra-index-url https://download.pytorch.org/whl/cu126
 accelerate==1.3.0
 transformers==4.48.2
 diffusers==0.32.2
