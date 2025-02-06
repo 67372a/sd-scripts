@@ -71,9 +71,9 @@ def analyze_gradient_norms(parameters):
     
     for param in parameters:
         if param.grad is not None:
-            grad = param.grad
+            grad = param.grad.detach()
 
-            norm = torch.norm(grad).item()
+            norm = torch.norm(grad, p=2.0).item()
             if not (np.isnan(norm) or np.isinf(norm)):
                 grad_norms.append(norm)
     
