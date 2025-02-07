@@ -876,9 +876,9 @@ class NetworkTrainer:
             if cache_latents:
                 train_dataset_group.new_cache_latents(vae, accelerator)
 
-            #if val_dataset_group is not None:
-            #    print("Caching validation latents...")
-            #    val_dataset_group.new_cache_latents(vae, accelerator)
+            if val_dataset_group is not None:
+                print("Caching validation latents...")
+                val_dataset_group.new_cache_latents(vae, accelerator)
 
             if cache_latents:
                 vae.to("cpu")
