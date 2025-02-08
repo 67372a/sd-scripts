@@ -24,6 +24,7 @@ def prepare_scheduler_for_custom_training(noise_scheduler, device, mu=None, b=No
     all_snr = (alpha / sigma) ** 2
 
     noise_scheduler.all_snr = all_snr.to(device)
+    noise_scheduler.all_timesteps = torch.linspace(0, 999, 1000).to(dtype=torch.long, device=device)
 
     # If user specified Laplace-based sampling arguments, compute them
     if mu is not None and b is not None:

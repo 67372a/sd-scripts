@@ -6371,6 +6371,12 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
     # Else use random timesteps
     if fixed_timesteps is not None:
         timesteps = fixed_timesteps
+    elif train and hasattr(noise_scheduler, "edm2_weights"):
+        timesteps = torch.multinomial(
+            noise_scheduler.edm2_weights,
+            num_samples=b_size,
+            replacement=True
+        ).long().to(latents.device)
     elif train and hasattr(noise_scheduler, "laplace_weights"):
         timesteps = torch.multinomial(
             noise_scheduler.laplace_weights,
@@ -7289,7 +7295,7 @@ def plot_dynamic_loss_weighting(args, step: int, model, num_timesteps: int = 100
     """
     with torch.inference_mode():
         # Generate a range of timesteps
-        timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to("cpu").int()
+        timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).to("cpu").long()
 
         model.train(False)
         loss, loss_scale = model(torch.ones_like(timesteps, device=device), timesteps)

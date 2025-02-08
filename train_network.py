@@ -724,6 +724,75 @@ class NetworkTrainer:
                 torch.cuda.set_rng_state(state, i)
 
         return current_val_loss, average_val_loss, logs
+    
+    def get_sampling_weights(self, model, noise_scheduler, device="cpu"):
+        """
+        Generate normalized sampling weights from the dynamic loss weighting model.
+        
+        :param model: The DynamicLossModule instance (after training)
+        :param num_timesteps: Total number of timesteps to sample from
+        :param device: Device to run computations on
+        :return: Normalized weights tensor suitable for multinomial sampling
+        """
+        with torch.inference_mode():
+            # Generate timesteps range
+            timesteps = noise_scheduler.all_timesteps
+            
+            # Get raw weights from model
+            model.train(False)
+            weights, _ = model(torch.ones_like(timesteps, device=device), timesteps)
+            model.train(True)
+        
+            eps= 1e-16
+            
+            # Ensure minimum value is 1e-8
+            weights = torch.maximum(weights, torch.tensor(eps))
+            
+            # Normalize weights to sum to 1
+            weights = weights / weights.sum()
+
+            snr_values = noise_scheduler.all_snr
+            
+            # Ensure SNR values are positive and compute log
+            log_snr = torch.log(snr_values.clamp(min=eps))
+            
+            # Sort by weights to find regions of high weight concentration
+            sorted_indices = torch.argsort(weights, descending=True)
+            sorted_weights = weights[sorted_indices]
+            sorted_log_snr = log_snr[sorted_indices]
+            
+            # Use overlapping sliding windows to find highest average weight region
+            window_size = 300  # Window size of X
+            slide_size = 25  # Slide by X steps each time
+            max_avg = 0
+            best_center_idx = 0
+            
+            # Iterate with overlapping windows
+            for i in range(0, len(weights) - window_size, slide_size):
+                window_avg = sorted_weights[i:i + window_size].mean()
+                if window_avg > max_avg:
+                    max_avg = window_avg
+                    best_center_idx = i + window_size // 2
+            
+            # Set mu to the log_snr value at the center of highest weight region
+            mu = sorted_log_snr[best_center_idx].clamp(min=-4.0, max=2.5)
+            
+            # Estimate b using weighted mean absolute deviation
+            abs_deviations = (log_snr - mu).abs()
+            b = (abs_deviations * weights).sum()
+                    
+            # Ensure b is not too small
+            b = b.clamp(min=1.0, max=10.0)
+            
+            logging.info(f"mu={mu}, b={b}")
+
+            log_snr = snr_values.log()
+
+            # laplace_weights formula (paper style)
+            laplace_weights = ((log_snr - mu).abs() / (-b)).exp() / (2 * b)
+            laplace_weights /= laplace_weights.mean()
+
+            noise_scheduler.edm2_weights = laplace_weights.to(device)
 
     def train(self, args):
         session_id = random.randint(0, 2**32)
@@ -1577,6 +1646,9 @@ class NetworkTrainer:
 
             if args.edm2_loss_weighting_generate_graph:
                 train_util.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
+
+            if args.edm2_loss_weighting_laplace:
+                self.get_sampling_weights(lossweightMLP, noise_scheduler, 1000, accelerator.device)
         else:
             mlp_lr_scheduler = None
             lossweightMLP = None
@@ -2401,6 +2473,9 @@ class NetworkTrainer:
                         if self.plot_dynamic_loss_weighting_check(args, global_step):
                             train_util.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
+                        if args.edm2_loss_weighting and args.edm2_loss_weighting_laplace:
+                            self.get_sampling_weights(lossweightMLP, noise_scheduler, 1000, accelerator.device)
+
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
@@ -2821,6 +2896,12 @@ def setup_parser() -> argparse.ArgumentParser:
         "--edm2_loss_weighting",
         action="store_true",
         help="Use EDM2 loss weighting.",
+    )
+
+    parser.add_argument(
+        "--edm2_loss_weighting_laplace",
+        action="store_true",
+        help="Use EDM2 loss weighting to calculate timestep sampling using laplace.",
     )
 
     parser.add_argument(
