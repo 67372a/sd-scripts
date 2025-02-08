@@ -1648,7 +1648,7 @@ class NetworkTrainer:
                 train_util.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
             if args.edm2_loss_weighting_laplace:
-                self.get_sampling_weights(lossweightMLP, noise_scheduler, 1000, accelerator.device)
+                self.get_sampling_weights(lossweightMLP, noise_scheduler, accelerator.device)
         else:
             mlp_lr_scheduler = None
             lossweightMLP = None
@@ -2474,7 +2474,7 @@ class NetworkTrainer:
                             train_util.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                         if args.edm2_loss_weighting and args.edm2_loss_weighting_laplace:
-                            self.get_sampling_weights(lossweightMLP, noise_scheduler, 1000, accelerator.device)
+                            self.get_sampling_weights(lossweightMLP, noise_scheduler, accelerator.device)
 
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
