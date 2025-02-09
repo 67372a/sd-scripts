@@ -354,7 +354,7 @@ class NetworkTrainer:
 
     def cache_text_encoder_outputs_if_needed(self, args, accelerator, unet, vae, text_encoders, dataset, weight_dtype):
         for t_enc in text_encoders:
-            t_enc.to(accelerator.device, dtype=weight_dtype)
+            t_enc.to(device=accelerator.device, dtype=weight_dtype)
 
     def call_unet(self, args, accelerator, unet, noisy_latents, timesteps, text_conds, batch, weight_dtype, **kwargs):
         noise_pred = unet(noisy_latents, timesteps, text_conds[0]).sample
@@ -532,12 +532,12 @@ class NetworkTrainer:
         total_loss = 0.0 
         with torch.autograd.grad_mode.inference_mode(mode=True):
             if "latents" in batch and batch["latents"] is not None:
-                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                latents = batch["latents"].to(device=accelerator.device, dtype=weight_dtype)
             else:
                 # Work around pending fix for caching validation latents
                 if args.cache_latents:
                     clean_memory_on_device(accelerator.device)
-                    vae.to(accelerator.device, dtype=vae_dtype)
+                    vae.to(device=accelerator.device, dtype=vae_dtype)
                     vae.requires_grad_(False)
                     vae.eval()
 
@@ -554,7 +554,7 @@ class NetworkTrainer:
                 latents = latents.to(device=accelerator.device)
 
                 if args.cache_latents:
-                    vae.to("cpu")
+                    vae.to(device="cpu")
                     clean_memory_on_device(accelerator.device)
 
             latents = self.shift_scale_latents(args, latents)
@@ -587,14 +587,14 @@ class NetworkTrainer:
                             weights_list,
                         )
                     else:
-                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                        input_ids = [ids.to(device=accelerator.device) for ids in batch["input_ids_list"]]
                         encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
                             tokenize_strategy,
                             self.get_models_for_text_encoding(args, accelerator, text_encoders),
                             input_ids,
                         )
                         if args.full_fp16:
-                            encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+                            encoded_text_encoder_conds = [c.to(dtype=weight_dtype) for c in encoded_text_encoder_conds]
 
                 # if text_encoder_conds is not cached, use encoded_text_encoder_conds
                 if len(text_encoder_conds) == 0:
@@ -724,75 +724,6 @@ class NetworkTrainer:
                 torch.cuda.set_rng_state(state, i)
 
         return current_val_loss, average_val_loss, logs
-    
-    def get_sampling_weights(self, model, noise_scheduler, device="cpu"):
-        """
-        Generate normalized sampling weights from the dynamic loss weighting model.
-        
-        :param model: The DynamicLossModule instance (after training)
-        :param num_timesteps: Total number of timesteps to sample from
-        :param device: Device to run computations on
-        :return: Normalized weights tensor suitable for multinomial sampling
-        """
-        with torch.inference_mode():
-            # Generate timesteps range
-            timesteps = noise_scheduler.all_timesteps
-            
-            # Get raw weights from model
-            model.train(False)
-            weights, _ = model(torch.ones_like(timesteps, device=device), timesteps)
-            model.train(True)
-        
-            eps= 1e-16
-            
-            # Ensure minimum value is 1e-8
-            weights = torch.maximum(weights, torch.tensor(eps))
-            
-            # Normalize weights to sum to 1
-            weights = weights / weights.sum()
-
-            snr_values = noise_scheduler.all_snr
-            
-            # Ensure SNR values are positive and compute log
-            log_snr = torch.log(snr_values.clamp(min=eps))
-            
-            # Sort by weights to find regions of high weight concentration
-            sorted_indices = torch.argsort(weights, descending=True)
-            sorted_weights = weights[sorted_indices]
-            sorted_log_snr = log_snr[sorted_indices]
-            
-            # Use overlapping sliding windows to find highest average weight region
-            window_size = 300  # Window size of X
-            slide_size = 25  # Slide by X steps each time
-            max_avg = 0
-            best_center_idx = 0
-            
-            # Iterate with overlapping windows
-            for i in range(0, len(weights) - window_size, slide_size):
-                window_avg = sorted_weights[i:i + window_size].mean()
-                if window_avg > max_avg:
-                    max_avg = window_avg
-                    best_center_idx = i + window_size // 2
-            
-            # Set mu to the log_snr value at the center of highest weight region
-            mu = sorted_log_snr[best_center_idx].clamp(min=-4.0, max=2.5)
-            
-            # Estimate b using weighted mean absolute deviation
-            abs_deviations = (log_snr - mu).abs()
-            b = (abs_deviations * weights).sum()
-                    
-            # Ensure b is not too small
-            b = b.clamp(min=1.0, max=10.0)
-            
-            logging.info(f"mu={mu}, b={b}")
-
-            log_snr = snr_values.log()
-
-            # laplace_weights formula (paper style)
-            laplace_weights = ((log_snr - mu).abs() / (-b)).exp() / (2 * b)
-            laplace_weights /= laplace_weights.mean()
-
-            noise_scheduler.edm2_weights = laplace_weights.to(device)
 
     def train(self, args):
         session_id = random.randint(0, 2**32)
@@ -802,7 +733,7 @@ class NetworkTrainer:
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
 
-        if bool(args.disable_cuda_reduced_precision_operations) if args.disable_cuda_reduced_precision_operations else False:
+        if args.disable_cuda_reduced_precision_operations:
             torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction=False
             torch.backends.cuda.matmul.allow_tf32=False
@@ -938,7 +869,7 @@ class NetworkTrainer:
 
         # 学習を準備する
         if cache_latents or val_dataset_group is not None:
-            vae.to(accelerator.device, dtype=vae_dtype)
+            vae.to(device=accelerator.device, dtype=vae_dtype)
             vae.requires_grad_(False)
             vae.eval()
 
@@ -950,7 +881,7 @@ class NetworkTrainer:
                 val_dataset_group.new_cache_latents(vae, accelerator)
 
             if cache_latents:
-                vae.to("cpu")
+                vae.to(device="cpu")
                 clean_memory_on_device(accelerator.device)
 
             accelerator.wait_for_everyone()
@@ -1125,13 +1056,13 @@ class NetworkTrainer:
                 args.mixed_precision == "fp16"
             ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
             accelerator.print("enable full fp16 training.")
-            network.to(weight_dtype)
+            network.to(dtype=weight_dtype)
         elif args.full_bf16:
             assert (
                 args.mixed_precision == "bf16"
             ), "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
             accelerator.print("enable full bf16 training.")
-            network.to(weight_dtype)
+            network.to(dtype=weight_dtype)
 
         if bool(args.train_network_norm_modules_as_float32) if args.train_network_norm_modules_as_float32 else False:
             # Recast normalization layers and their children back to FP32
@@ -1194,7 +1125,7 @@ class NetworkTrainer:
                 # default implementation is:  unet = accelerator.prepare(unet)
                 unet = self.prepare_unet_with_accelerator(args, accelerator, unet)  # accelerator does some magic here
             else:
-                unet.to(accelerator.device, dtype=unet_weight_dtype)  # move to device because unet is not prepared by accelerator
+                unet.to(device=accelerator.device, dtype=unet_weight_dtype)  # move to device because unet is not prepared by accelerator
             if train_text_encoder:
                 text_encoders = [
                     (accelerator.prepare(t_enc) if flag else t_enc)
@@ -1240,7 +1171,7 @@ class NetworkTrainer:
         if not cache_latents:  # キャッシュしない場合はVAEを使うのでVAEを準備する
             vae.requires_grad_(False)
             vae.eval()
-            vae.to(accelerator.device, dtype=vae_dtype)
+            vae.to(device=accelerator.device, dtype=vae_dtype)
 
         # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
         if args.full_fp16:
@@ -1648,7 +1579,7 @@ class NetworkTrainer:
                 train_util.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
 
             if args.edm2_loss_weighting_laplace:
-                self.get_sampling_weights(lossweightMLP, noise_scheduler, accelerator.device)
+                train_util.calculate_edm2_laplace(lossweightMLP, noise_scheduler, accelerator.device)
         else:
             mlp_lr_scheduler = None
             lossweightMLP = None
@@ -1901,11 +1832,11 @@ class NetworkTrainer:
 
                         # Prepare latents
                         if "latents" in batch and batch["latents"] is not None:
-                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                            latents = batch["latents"].to(device=accelerator.device, dtype=weight_dtype)
                         else:
                             with torch.no_grad():
                                 # Convert images to latents
-                                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(device=vae.device, dtype=vae_dtype))
                                 latents = latents.to(dtype=weight_dtype)
                                 # Replace NaNs if any
                                 if torch.any(torch.isnan(latents)):
@@ -1937,14 +1868,14 @@ class NetworkTrainer:
                                         weights_list,
                                     )
                                 else:
-                                    input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                                    input_ids = [ids.to(device=accelerator.device) for ids in batch["input_ids_list"]]
                                     encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
                                         tokenize_strategy,
                                         self.get_models_for_text_encoding(args, accelerator, text_encoders),
                                         input_ids,
                                     )
                                 if args.full_fp16:
-                                    encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+                                    encoded_text_encoder_conds = [c.to(dtype=weight_dtype) for c in encoded_text_encoder_conds]
                             # Update text encoder conditions
                             if not text_encoder_conds:
                                 text_encoder_conds = encoded_text_encoder_conds
@@ -2113,6 +2044,12 @@ class NetworkTrainer:
                         progress_bar.update(1)
                         global_step += 1
 
+                        if self.plot_dynamic_loss_weighting_check(args, global_step):
+                            train_util.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
+
+                        if args.edm2_loss_weighting and args.edm2_loss_weighting_laplace:
+                            train_util.calculate_edm2_laplace(lossweightMLP, noise_scheduler, accelerator.device)
+
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
                             args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0):
@@ -2265,11 +2202,11 @@ class NetworkTrainer:
                         self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype)
 
                         if "latents" in batch and batch["latents"] is not None:
-                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                            latents = batch["latents"].to(device=accelerator.device, dtype=weight_dtype)
                         else:
                             with torch.no_grad():
                                 # latentに変換
-                                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(vae_dtype))
+                                latents = self.encode_images_to_latents(args, accelerator, vae, batch["images"].to(device=vae.device, dtype=vae_dtype))
                                 latents = latents.to(dtype=weight_dtype)
 
                                 # NaNが含まれていれば警告を表示し0に置き換える
@@ -2308,14 +2245,14 @@ class NetworkTrainer:
                                         weights_list,
                                     )
                                 else:
-                                    input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                                    input_ids = [ids.to(device=accelerator.device) for ids in batch["input_ids_list"]]
                                     encoded_text_encoder_conds = text_encoding_strategy.encode_tokens(
                                         tokenize_strategy,
                                         self.get_models_for_text_encoding(args, accelerator, text_encoders),
                                         input_ids,
                                     )
                                 if args.full_fp16:
-                                    encoded_text_encoder_conds = [c.to(weight_dtype) for c in encoded_text_encoder_conds]
+                                    encoded_text_encoder_conds = [c.to(dtype=weight_dtype) for c in encoded_text_encoder_conds]
 
                             # if text_encoder_conds is not cached, use encoded_text_encoder_conds
                             if len(text_encoder_conds) == 0:
@@ -2474,7 +2411,7 @@ class NetworkTrainer:
                             train_util.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
 
                         if args.edm2_loss_weighting and args.edm2_loss_weighting_laplace:
-                            self.get_sampling_weights(lossweightMLP, noise_scheduler, accelerator.device)
+                            train_util.calculate_edm2_laplace(lossweightMLP, noise_scheduler, accelerator.device)
 
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 

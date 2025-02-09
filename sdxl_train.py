@@ -890,6 +890,9 @@ def train(args):
 
         if args.edm2_loss_weighting_generate_graph:
             train_util.plot_dynamic_loss_weighting(args, 0, lossweightMLP, 1000, accelerator.device)
+
+        if args.edm2_loss_weighting_laplace:
+            train_util.calculate_edm2_laplace(lossweightMLP, noise_scheduler, accelerator.device)
     else:
         mlp_lr_scheduler = None
         lossweightMLP = None
@@ -1167,6 +1170,9 @@ def train(args):
 
                         if args.edm2_loss_weighting and args.edm2_loss_weighting_generate_graph and (global_step % (int(args.edm2_loss_weighting_generate_graph_every_x_steps) if args.edm2_loss_weighting_generate_graph_every_x_steps else 20) == 0 or global_step >= args.max_train_steps):
                             train_util.plot_dynamic_loss_weighting(args, global_step, lossweightMLP, 1000, accelerator.device)
+
+                        if args.edm2_loss_weighting and args.edm2_loss_weighting_laplace:
+                            train_util.calculate_edm2_laplace(lossweightMLP, noise_scheduler, accelerator.device)
 
                         if (train_util.sample_images_check(args, None, global_step) or 
                             train_util.calculate_val_loss_check(args, global_step, step, val_dataloader, train_dataloader) or 
@@ -1894,6 +1900,11 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Stochastic accumulation"
     )
 
+    parser.add_argument(
+        "--edm2_loss_weighting_laplace",
+        action="store_true",
+        help="Use EDM2 loss weighting to calculate timestep sampling using laplace.",
+    )
 
 
     return parser

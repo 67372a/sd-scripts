@@ -3549,7 +3549,7 @@ def sangoi_loss_modifier(
                             noise_scheduler,
                             min_snr: float = 1e-4,
                             max_snr: float = 100,
-                            eps: float = 1e-30) -> torch.Tensor:
+                            eps: float = None) -> torch.Tensor:
     """
     Source: https://github.com/sangoi-exe/sangoi-loss-function
     
@@ -3568,6 +3568,9 @@ def sangoi_loss_modifier(
     Returns:
         Tensor: A tensor of weights per example to modify the loss.
     """
+
+    if eps is None or eps == 0.0:
+        eps = torch.finfo(torch.float32).tiny 
 
     # Obtain the SNR for each timestep
     snr = noise_scheduler.all_snr[timesteps.long()]
@@ -6299,7 +6302,7 @@ def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: flo
 
 def get_timesteps(min_timestep, max_timestep, b_size, device) -> torch.Tensor:
     timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device="cpu")
-    timesteps = timesteps.long().to(device)
+    timesteps = timesteps.to(dtype=torch.long, device=device)
     return timesteps
 
 # https://github.com/yhli123/Immiscible-Diffusion/blob/main/stable_diffusion/conditional_ft_train_sd.py#L941
@@ -6371,18 +6374,18 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
     # Else use random timesteps
     if fixed_timesteps is not None:
         timesteps = fixed_timesteps
-    elif train and hasattr(noise_scheduler, "edm2_weights"):
+    elif train and hasattr(noise_scheduler, "edm2_laplace_weights"):
         timesteps = torch.multinomial(
-            noise_scheduler.edm2_weights,
+            noise_scheduler.edm2_laplace_weights,
             num_samples=b_size,
-            replacement=True
-        ).long().to(latents.device)
+            replacement=False
+        ).to(dtype=torch.long, device=latents.device)
     elif train and hasattr(noise_scheduler, "laplace_weights"):
         timesteps = torch.multinomial(
             noise_scheduler.laplace_weights,
             num_samples=b_size,
             replacement=True
-        ).long().to(latents.device)
+        ).to(dtype=torch.long, device=latents.device)
     elif train and args.timestep_sampling != "uniform":
         shift = args.discrete_flow_shift
         logits_norm = torch.randn(b_size,  device="cpu")
@@ -6393,7 +6396,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
             timesteps = time_shift(mu, 1.0, timesteps)
         else:
             timesteps = (timesteps * shift) / (1 + (shift - 1) * timesteps)
-        timesteps = min_timestep + (timesteps * (max_timestep - min_timestep)).long().to(latents.device)
+        timesteps = min_timestep + (timesteps * (max_timestep - min_timestep)).to(dtype=torch.long, device=latents.device)
     else:
         # Fallback to default (random) sampling
         timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
@@ -7346,6 +7349,112 @@ def convert_named_modules_to_fp32(model):
                 with torch.amp.autocast(enabled=False):
                     return original_forward(*args, **kwargs)
             module.forward = forward_with_fp32
+
+def calculate_edm2_laplace(model, noise_scheduler, device="cpu", eps: float = None):
+    """
+    Generate normalized sampling weights from the dynamic loss weighting model.
+    
+    :param model: The DynamicLossModule instance (after training)
+    :param num_timesteps: Total number of timesteps to sample from
+    :param device: Device to run computations on
+    :return: Normalized weights tensor suitable for multinomial sampling
+    """
+    with torch.inference_mode():
+        # Generate timesteps range
+        timesteps = noise_scheduler.all_timesteps
+        
+        # Get raw weights from model
+        model.train(False)
+        weights, _ = model(torch.ones_like(timesteps, device=device), timesteps)
+        model.train(True)
+    
+        if eps is None or eps == 0.0:
+            eps = torch.finfo(torch.float32).tiny 
+        
+        # Ensure minimum value is 1e-8
+        weights = torch.maximum(weights, torch.tensor(eps))
+        
+        # Normalize weights to sum to 1
+        weights = weights / weights.sum()
+
+        snr_values = noise_scheduler.all_snr
+        
+        # Ensure SNR values are positive and compute log
+        log_snr = torch.log(snr_values.clamp(min=eps))
+        
+        # Sort by weights to find regions of high weight concentration
+        sorted_indices = torch.argsort(weights, descending=True)
+        sorted_weights = weights[sorted_indices]
+        sorted_log_snr = log_snr[sorted_indices]
+        
+        # Use binary search to find highest average weight region
+        window_size = 25  # Minimum window size of X
+        max_depth = int(np.log2(len(weights) / window_size))  # Maximum splits based on window size
+        
+        def get_window_avg(start_idx, size):
+            end_idx = min(start_idx + size, len(sorted_weights))
+            return sorted_weights[start_idx:end_idx].mean()
+        
+        # Initial search range
+        left = 0
+        right = len(weights) - window_size
+        max_avg = 0
+        best_center_idx = 0
+        
+        # Search for maximum average weight region
+        for depth in range(max_depth):
+            # Check three points: left third, middle, right third
+            mid = (left + right) // 2
+            third = (right - left) // 3
+            
+            left_third = left + third
+            right_third = right - third
+            
+            left_avg = get_window_avg(left_third, window_size)
+            mid_avg = get_window_avg(mid, window_size)
+            right_avg = get_window_avg(right_third, window_size)
+            
+            #logger.info(f"Depth {depth}: left_avg={left_avg}, mid_avg={mid_avg}, right_avg={right_avg}")
+            
+            # Update best if we found a higher average
+            if left_avg > max_avg:
+                max_avg = left_avg
+                best_center_idx = left_third + window_size // 2
+            if mid_avg > max_avg:
+                max_avg = mid_avg
+                best_center_idx = mid + window_size // 2
+            if right_avg > max_avg:
+                max_avg = right_avg
+                best_center_idx = right_third + window_size // 2
+            
+            # Narrow search range based on which third has highest average
+            if left_avg >= mid_avg and left_avg >= right_avg:
+                right = mid
+            elif right_avg >= mid_avg and right_avg >= left_avg:
+                left = mid
+            else:
+                left = left_third
+                right = right_third
+        
+        # Set mu to the log_snr value at the center of highest weight region
+        mu = sorted_log_snr[best_center_idx].clamp(min=-4.0, max=2.5)
+        
+        # Estimate b using weighted mean absolute deviation
+        abs_deviations = (log_snr - mu).abs()
+        b = (abs_deviations * weights).sum()
+                
+        # Ensure b is not too small
+        b = b.clamp(min=1.0, max=10.0)
+        
+        logging.info(f"mu={mu}, b={b}")
+
+        log_snr = snr_values.log()
+
+        # laplace_weights formula (paper style)
+        laplace_weights = ((log_snr - mu).abs() / (-b)).exp() / (2 * b)
+        laplace_weights /= laplace_weights.mean()
+
+        noise_scheduler.edm2_laplace_weights = laplace_weights.to(device)
 
 def set_padding_mode_for_conv2d_modules(model: torch.nn.Module, padding_mode: str = 'zeros'):
     for module in model.modules():
