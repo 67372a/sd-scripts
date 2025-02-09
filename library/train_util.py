@@ -7351,14 +7351,6 @@ def convert_named_modules_to_fp32(model):
             module.forward = forward_with_fp32
 
 def calculate_edm2_laplace(model, noise_scheduler, device="cpu", eps: float = None):
-    """
-    Generate normalized sampling weights from the dynamic loss weighting model.
-    
-    :param model: The DynamicLossModule instance (after training)
-    :param num_timesteps: Total number of timesteps to sample from
-    :param device: Device to run computations on
-    :return: Normalized weights tensor suitable for multinomial sampling
-    """
     with torch.inference_mode():
         # Generate timesteps range
         timesteps = noise_scheduler.all_timesteps
@@ -7382,62 +7374,13 @@ def calculate_edm2_laplace(model, noise_scheduler, device="cpu", eps: float = No
         # Ensure SNR values are positive and compute log
         log_snr = torch.log(snr_values.clamp(min=eps))
         
-        # Sort by weights to find regions of high weight concentration
-        sorted_indices = torch.argsort(weights, descending=True)
-        sorted_weights = weights[sorted_indices]
+        # Compute weighted median of log_snr
+        sorted_indices = torch.argsort(log_snr)
         sorted_log_snr = log_snr[sorted_indices]
-        
-        # Use binary search to find highest average weight region
-        window_size = 25  # Minimum window size of X
-        max_depth = int(np.log2(len(weights) / window_size))  # Maximum splits based on window size
-        
-        def get_window_avg(start_idx, size):
-            end_idx = min(start_idx + size, len(sorted_weights))
-            return sorted_weights[start_idx:end_idx].mean()
-        
-        # Initial search range
-        left = 0
-        right = len(weights) - window_size
-        max_avg = 0
-        best_center_idx = 0
-        
-        # Search for maximum average weight region
-        for depth in range(max_depth):
-            # Check three points: left third, middle, right third
-            mid = (left + right) // 2
-            third = (right - left) // 3
-            
-            left_third = left + third
-            right_third = right - third
-            
-            left_avg = get_window_avg(left_third, window_size)
-            mid_avg = get_window_avg(mid, window_size)
-            right_avg = get_window_avg(right_third, window_size)
-            
-            #logger.info(f"Depth {depth}: left_avg={left_avg}, mid_avg={mid_avg}, right_avg={right_avg}")
-            
-            # Update best if we found a higher average
-            if left_avg > max_avg:
-                max_avg = left_avg
-                best_center_idx = left_third + window_size // 2
-            if mid_avg > max_avg:
-                max_avg = mid_avg
-                best_center_idx = mid + window_size // 2
-            if right_avg > max_avg:
-                max_avg = right_avg
-                best_center_idx = right_third + window_size // 2
-            
-            # Narrow search range based on which third has highest average
-            if left_avg >= mid_avg and left_avg >= right_avg:
-                right = mid
-            elif right_avg >= mid_avg and right_avg >= left_avg:
-                left = mid
-            else:
-                left = left_third
-                right = right_third
-        
-        # Set mu to the log_snr value at the center of highest weight region
-        mu = sorted_log_snr[best_center_idx].clamp(min=-4.0, max=2.5)
+        sorted_weights = weights[sorted_indices]
+        cumulative_weights = torch.cumsum(sorted_weights, dim=0)
+        median_idx = torch.searchsorted(cumulative_weights, 0.5)
+        mu = sorted_log_snr[median_idx].clamp(min=-4.0, max=2.5)
         
         # Estimate b using weighted mean absolute deviation
         abs_deviations = (log_snr - mu).abs()
