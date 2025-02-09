@@ -6384,7 +6384,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
         timesteps = torch.multinomial(
             noise_scheduler.laplace_weights,
             num_samples=b_size,
-            replacement=True
+            replacement=False
         ).to(dtype=torch.long, device=latents.device)
     elif train and args.timestep_sampling != "uniform":
         shift = args.discrete_flow_shift
