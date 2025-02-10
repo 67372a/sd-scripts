@@ -6401,6 +6401,7 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
         # Fallback to default (random) sampling
         timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
 
+    multires_noise_scaling = None
     if (train and ((args.multires_noise_iterations and args.multires_noise_scaling in {'snr', 'inverse_snr'}) or
         (args.ip_noise_gamma and args.ip_noise_gamma_scaling in {'snr', 'inverse_snr'}))):
             # Get SNR for current timesteps
