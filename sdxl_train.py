@@ -463,7 +463,7 @@ def train(args):
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
     # 学習を準備する
-    if cache_latents or val_dataset_group is not None:
+    if cache_latents: #or val_dataset_group is not None:
         vae.to(accelerator.device, dtype=vae_dtype)
         vae.requires_grad_(False)
         vae.eval()
@@ -471,9 +471,9 @@ def train(args):
         if cache_latents:
             train_dataset_group.new_cache_latents(vae, accelerator)
 
-        if val_dataset_group is not None:
-            print("Caching validation latents...")
-            val_dataset_group.new_cache_latents(vae, accelerator)
+        #if val_dataset_group is not None:
+        #    print("Caching validation latents...")
+        #    val_dataset_group.new_cache_latents(vae, accelerator)
 
         if cache_latents:
             vae.to("cpu")
@@ -748,7 +748,7 @@ def train(args):
     sync_gradients: bool = False
 
     # Check if we should be doing manual grad sync without accelerator accumlator
-    manual_grad_sync: bool = args.full_bf16 and args.stochastic_accumulator
+    manual_grad_sync: bool = args.full_bf16 and args.stochastic_accumulation
 
     if args.fused_backward_pass:
         if isinstance(optimizer, transformers.optimization.Adafactor):
