@@ -320,12 +320,10 @@ def train(args):
     strategy_base.TokenizeStrategy.set_strategy(tokenize_strategy)
     tokenizers = [tokenize_strategy.tokenizer1, tokenize_strategy.tokenizer2]  # will be removed in the future
 
-    # prepare caching strategy: this must be set before preparing dataset. because dataset may use this strategy for initialization.
-    if args.cache_latents:
-        latents_caching_strategy = strategy_sd.SdSdxlLatentsCachingStrategy(
-            False, args.cache_latents_to_disk, args.vae_batch_size, args.skip_cache_check
-        )
-        strategy_base.LatentsCachingStrategy.set_strategy(latents_caching_strategy)
+    latents_caching_strategy = strategy_sd.SdSdxlLatentsCachingStrategy(
+        False, args.cache_latents_to_disk, args.vae_batch_size, args.skip_cache_check
+    )
+    strategy_base.LatentsCachingStrategy.set_strategy(latents_caching_strategy)
 
     # データセットを準備する
     if args.dataset_class is None:
