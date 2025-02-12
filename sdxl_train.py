@@ -122,7 +122,6 @@ def process_val_batch(batch, tokenize_strategy, text_encoder1, text_encoder2, te
         if "latents" in batch and batch["latents"] is not None:
             latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
         else:
-            # Work around pending fix for caching validation latents
             if args.cache_latents:
                 clean_memory_on_device(accelerator.device)
                 vae.to(accelerator.device, dtype=vae_dtype)
@@ -461,7 +460,7 @@ def train(args):
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
     # 学習を準備する
-    if cache_latents: #or val_dataset_group is not None:
+    if cache_latents or val_dataset_group is not None:
         vae.to(accelerator.device, dtype=vae_dtype)
         vae.requires_grad_(False)
         vae.eval()
@@ -469,9 +468,9 @@ def train(args):
         if cache_latents:
             train_dataset_group.new_cache_latents(vae, accelerator)
 
-        #if val_dataset_group is not None:
-        #    print("Caching validation latents...")
-        #    val_dataset_group.new_cache_latents(vae, accelerator)
+        if val_dataset_group is not None:
+            print("Caching validation latents...")
+            val_dataset_group.new_cache_latents(vae, accelerator)
 
         if cache_latents:
             vae.to("cpu")

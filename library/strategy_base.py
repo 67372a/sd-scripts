@@ -501,7 +501,7 @@ class LatentsCachingStrategy:
             crop_ltrb = crop_ltrbs[i]
 
             latents_size = latents.shape[1:3]  # H, W
-            key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}" if multi_resolution else ""  # e.g. "_32x64", HxW
+            key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}" # e.g. "_32x64", HxW
 
             if self.cache_to_disk:
                 self.save_latents_to_disk(
@@ -521,7 +521,7 @@ class LatentsCachingStrategy:
         """
         for SD/SDXL
         """
-        return self._default_load_latents_from_disk(None, npz_path, bucket_reso)
+        return self._default_load_latents_from_disk(8, npz_path, bucket_reso)
 
     def _default_load_latents_from_disk(
         self, latents_stride: Optional[int], npz_path: str, bucket_reso: Tuple[int, int]

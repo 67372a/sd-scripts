@@ -534,7 +534,6 @@ class NetworkTrainer:
             if "latents" in batch and batch["latents"] is not None:
                 latents = batch["latents"].to(device=accelerator.device, dtype=weight_dtype)
             else:
-                # Work around pending fix for caching validation latents
                 if args.cache_latents:
                     clean_memory_on_device(accelerator.device)
                     vae.to(device=accelerator.device, dtype=vae_dtype)

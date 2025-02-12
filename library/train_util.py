@@ -2056,7 +2056,7 @@ class DreamBoothDataset(BaseDataset):
         num_reg_images = 0
         num_val_images = 0
         reg_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
-        #val_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
+        val_infos: List[Tuple[ImageInfo, DreamBoothSubset]] = []
         for subset in subsets:
             if subset.num_repeats < 1:
                 logger.warning(
@@ -2085,8 +2085,8 @@ class DreamBoothDataset(BaseDataset):
 
             if subset.is_reg:
                 num_reg_images += subset.num_repeats * len(img_paths)
-            #elif subset.is_val:
-            #    num_val_images += subset.num_repeats * len(img_paths)
+            elif subset.is_val:
+                num_val_images += subset.num_repeats * len(img_paths)
             else:
                 num_train_images += subset.num_repeats * len(img_paths)
 
@@ -2096,8 +2096,9 @@ class DreamBoothDataset(BaseDataset):
                     info.image_size = size
                 if subset.is_reg:
                     reg_infos.append((info, subset))
-                #if subset.is_val:
-                #    val_infos.append((info, subset))
+                if subset.is_val:
+                    val_infos.append((info, subset))
+                    self.register_image(info, subset)
                 else:
                     self.register_image(info, subset)
 
@@ -2128,24 +2129,6 @@ class DreamBoothDataset(BaseDataset):
                     if n >= num_train_images:
                         break
                 first_loop = False
-
-        #if num_val_images == 0:
-        #    logger.warning("no validation images / TBD")
-        #else:
-            # num_repeatsを計算する：どうせ大した数ではないのでループで処理する
-        #    n = 0
-        #    first_loop = True
-        #    while n < num_train_images:
-        #        for info, subset in val_infos:
-        #            if first_loop:
-        #                self.register_image(info, subset)
-        #                n += info.num_repeats
-        #            else:
-        #                info.num_repeats += 1  # rewrite registered info
-        #                n += 1
-        #            if n >= num_train_images:
-        #                break
-        #        first_loop = False
 
         self.num_reg_images = num_reg_images
         self.num_val_images = num_val_images
