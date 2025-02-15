@@ -6539,42 +6539,6 @@ def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler
 
     return result
 
-def get_gamma_if_needed(args, loss_type: str, global_step: int, final_step: int) -> Optional[float]:
-    if not (loss_type == "l0"):
-        return None
-    
-    gamma_max = float(getattr(args, 'l0_loss_gamma_max', 2.0))
-    gamma_min = float(getattr(args, 'l0_loss_gamma_min', 0.0))
-    decay_schedule = str(getattr(args, 'l0_loss_gamma_decay_schedule', 'linear')).lower()
-
-    # Protect against division by zero
-    if final_step == 0:
-        return gamma_max
-        
-    # Ensure global_step doesn't exceed final_step
-    current_step = min(global_step, final_step)
-    
-    # Calculate progress ratio (0 to 1)
-    progress = current_step / final_step
-    
-    # Calculate gamma based on scaling type
-    if decay_schedule == 'linear':
-        # Linear interpolation: gamma = gamma_max + (gamma_min - gamma_max) * progress
-        gamma = gamma_max + (gamma_min - gamma_max) * progress
-        
-    elif decay_schedule == 'exponential':
-        # Exponential decay: gamma = gamma_min + (gamma_max - gamma_min) * exp(-1 * progress)
-        gamma = gamma_min + (gamma_max - gamma_min) * math.exp(-1 * progress)
-        
-    elif decay_schedule == 'cosine':
-        # Cosine annealing: gamma = gamma_min + 0.5 * (gamma_max - gamma_min) * (1 + cos(pi * progress))
-        gamma = gamma_min + 0.5 * (gamma_max - gamma_min) * (1 + math.cos(math.pi * progress))
-        
-    else:  # default to constant gamma_max if scaling type is not recognized
-        gamma = gamma_max
-    
-    return gamma
-
 def calculate_val_loss_check(args, global_step, epoch_step, val_dataloader, train_dataloader) -> bool:
     if val_dataloader is None:
         return False
@@ -6824,12 +6788,6 @@ def conditional_loss(
     elif loss_type == "smooth_l1":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = 2 * (torch.sqrt((model_pred - target) ** 2 + huber_c**2) - huber_c)
-        if reduction == "mean":
-            loss = torch.mean(loss)
-        elif reduction == "sum":
-            loss = torch.sum(loss)
-    elif loss_type == "l0":
-        loss = (torch.abs(model_pred - target) + eps).pow(gamma)
         if reduction == "mean":
             loss = torch.mean(loss)
         elif reduction == "sum":

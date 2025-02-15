@@ -1904,7 +1904,6 @@ class NetworkTrainer:
                             target = target.float()
 
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
-                        gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
                         loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma, scale=float(args.loss_scale))
 
@@ -2283,7 +2282,6 @@ class NetworkTrainer:
                             target = target.float()
 
                         huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
-                        gamma = train_util.get_gamma_if_needed(args, args.loss_type, global_step, args.max_train_steps)
                         # Compute loss
                         loss = train_util.conditional_loss(noise_pred, target, args.loss_type, "none", huber_c, gamma, scale=float(args.loss_scale))
 
@@ -2870,14 +2868,14 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edm2_loss_weighting_lr_scheduler_warmup_percent",
         type=float,
-        default=0.10,
+        default=0.1,
         help="Percent of training steps to use for warmup.",
     )
 
     parser.add_argument(
         "--edm2_loss_weighting_lr_scheduler_constant_percent",
         type=float,
-        default=0.10,
+        default=0.1,
         help="Percent of training steps to maintain constant LR before decay.",
     )
 
@@ -2980,28 +2978,7 @@ def setup_parser() -> argparse.ArgumentParser:
             default=100,
             help="Max SNR limit for sangoi loss modifier.",
         )
-    
-    parser.add_argument(
-            "--l0_loss_gamma_max",
-            type=float,
-            default=2.0,
-            help="Max / initial gamma for l0 loss.",
-        )
-    
-    parser.add_argument(
-            "--l0_loss_gamma_min",
-            type=float,
-            default=0.0,
-            help="Min / final gamma for l0 loss.",
-        )
-    
-    parser.add_argument(
-            "--l0_loss_gamma_decay_schedule",
-            type=str,
-            default="linear",
-            choices=["linear", "exponential", "cosine"],
-            help="Decay schedule for l0 loss gamma decay.",
-        )
+
     parser.add_argument(
         "--laplace_timestep_sampling_mu",
         type=float,
