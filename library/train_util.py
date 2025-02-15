@@ -6728,7 +6728,6 @@ def conditional_loss(
     loss_type: str, 
     reduction: str,
     huber_c: Optional[torch.Tensor] = None,
-    gamma: float = 2.0,
     eps: float = 1e-8,
     scale: float = 1.0,
 ):
