@@ -6518,11 +6518,11 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents, fixed_
 
 
 def get_huber_threshold_if_needed(args, timesteps: torch.Tensor, noise_scheduler) -> Optional[torch.Tensor]:
-    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log", "soft_welsch","scaled_quadratic"}:
+    if args.loss_type not in {"huber", "smooth_l1", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "soft_welsch","scaled_quadratic"}:
         return None
 
     b_size = timesteps.shape[0]
-    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "smooth_l2_log", "soft_welsch","scaled_quadratic"}:
+    if args.huber_schedule in {"constant", "standard_pseudo_huber", "standard_huber", "standard_smooth_l1", "soft_welsch","scaled_quadratic"}:
         result = torch.full((b_size,), args.huber_c * float(args.huber_scale), device=timesteps.device)
     elif args.huber_schedule == "exponential":
         alpha = -math.log(args.huber_c) / noise_scheduler.config.num_train_timesteps
