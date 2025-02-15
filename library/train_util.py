@@ -6667,39 +6667,6 @@ def pseudo_huber_loss(predictions, targets, delta=1.0, reduction="mean"):
         raise ValueError(f"Unsupported reduction type: {reduction}")
     return loss
 
-def smooth_l2_log_loss(
-    predictions: torch.Tensor,
-    targets: torch.Tensor,
-    delta: float = 1.0,
-    reduction: str = 'mean'
-) -> torch.Tensor:
-    """
-    Functional version of the smooth l2->log loss.
-    
-    Args:
-        predictions: Predicted values of shape (*)
-        targets: Target values of shape (*), same shape as predictions
-        delta: Transition point between L2 and logarithmic behavior
-        reduction: Reduction to apply to batch: 'none' | 'mean' | 'sum'
-        
-    Returns:
-        Loss tensor of shape () if reduction is 'mean' or 'sum',
-        or same shape as inputs if reduction is 'none'
-    """
-    r = predictions - targets
-    delta_squared = delta ** 2
-    loss = 0.5 * delta_squared * torch.log1p(r ** 2 / delta_squared)
-    
-    if reduction == "mean":
-        loss = torch.mean(loss)
-    elif reduction == "sum":
-        loss = torch.sum(loss)
-    elif reduction == "none":
-        loss = loss
-    else:
-        raise ValueError(f"Unsupported reduction type: {reduction}")
-    return loss
-
 def scaled_quadratic_loss(
     predictions: torch.Tensor,
     targets: torch.Tensor,
@@ -6798,9 +6765,6 @@ def conditional_loss(
         loss = stable_log_cosh_loss(model_pred, target, reduction=reduction)
     elif loss_type == "squared_logarithmic":
         loss = stable_msle_loss(model_pred, target, reduction=reduction)
-    elif loss_type == "smooth_l2_log":
-        huber_c = huber_c.view(-1, 1, 1, 1)
-        loss = smooth_l2_log_loss(model_pred, target, delta=huber_c, reduction=reduction)
     elif loss_type == "soft_welsch":
         huber_c = huber_c.view(-1, 1, 1, 1)
         loss = soft_welsch_loss(model_pred, target, reduction=reduction, delta=huber_c, scale=scale)
