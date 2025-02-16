@@ -110,7 +110,7 @@ def get_snr_scale(timesteps, noise_scheduler):
 def add_v_prediction_like_loss(loss, timesteps, noise_scheduler, v_pred_like_loss):
     scale = get_snr_scale(timesteps, noise_scheduler)
     # logger.info(f"add v-prediction like loss: {v_pred_like_loss}, scale: {scale}, loss: {loss}, time: {timesteps}")
-    loss = loss + loss / scale * v_pred_like_loss
+    loss = loss + loss / scale * torch.full_like(input=scale, fill_value=v_pred_like_loss)
     return loss
 
 
