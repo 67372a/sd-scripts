@@ -23,7 +23,7 @@ toml==0.10.2
 voluptuous==0.15.2
 huggingface-hub==0.28.1
 matplotlib==3.10.0
-scipy==1.15.1
+scipy==1.15.2
 # for Image utils
 imagesize==1.4.1
 # for BLIP captioning
