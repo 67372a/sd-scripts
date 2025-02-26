@@ -38,6 +38,8 @@ matplotlib.use('Agg')  # Set the backend to 'Agg', non-interactive backend
 import matplotlib.pyplot as plt
 plt.ioff() # Explicitly turn off interactive mode
 
+import kornia
+
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
@@ -6772,6 +6774,24 @@ def conditional_loss(
         loss = scaled_quadratic_loss(model_pred, target, reduction=reduction, delta=huber_c, eps=torch.finfo(torch.float32).tiny)
     elif loss_type == "standard_deviation_loss":
         loss = standard_deviation_loss(model_pred, target, reduction=reduction)
+    elif loss_type == "psnr_loss":
+        model_pred = model_pred.to(torch.float64)
+        target = target.to(torch.float64)
+        loss = kornia.losses.psnr_loss(model_pred, target, 1.0)
+        loss = loss.add(torch.finfo(torch.float32).tiny)
+        if reduction == "mean":
+            loss = torch.mean(loss)
+        elif reduction == "sum":
+            loss = torch.sum(loss)
+    elif loss_type == "geman_mcclure_loss":
+        model_pred = model_pred.to(torch.float64)
+        target = target.to(torch.float64)
+        loss = kornia.losses.geman_mcclure_loss(model_pred, target)
+        loss = loss.add(torch.finfo(torch.float32).tiny)
+        if reduction == "mean":
+            loss = torch.mean(loss)
+        elif reduction == "sum":
+            loss = torch.sum(loss)
     else:
         raise NotImplementedError(f"Unsupported Loss Type: {loss_type}")
     return loss

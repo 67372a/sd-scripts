@@ -58,6 +58,7 @@ cmake==3.31.4
 setuptools==75.8.0
 #triton==3.2.0; platform_system == "Linux"
 prodigy-plus-schedule-free==1.9.0
+kornia==0.8.0
 #xformers==v0.0.29.post2
 # for kohya_ss library
 -e .
