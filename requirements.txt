@@ -1,6 +1,6 @@
 #torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 #torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
-accelerate==1.6.0
+accelerate==1.7.0
 transformers==4.50.3
 diffusers==0.33.1
 ftfy==6.3.1
