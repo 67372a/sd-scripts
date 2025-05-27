@@ -31,7 +31,7 @@ setuptools==80.7.1
 triton==3.3.0; platform_system == "Linux"
 triton-windows==3.3.0.post19; platform_system == "Windows"
 prodigy-plus-schedule-free==1.9.2
-kornia==0.8.0
+kornia==0.8.1
 xformers==v0.0.30 --index-url https://download.pytorch.org/whl/cu128
 PyWavelets==1.8.0
 hf-xet==1.1.2
