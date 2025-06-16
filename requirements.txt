@@ -5,7 +5,7 @@ transformers==4.50.3
 diffusers==0.33.1
 opencv-python==4.11.0.86
 einops==0.8.1
-pytorch-lightning==2.5.0.post0
+pytorch-lightning==2.5.1.post0
 bitsandbytes==0.46.0
 prodigyopt==1.1.2
 lion-pytorch==0.2.3
