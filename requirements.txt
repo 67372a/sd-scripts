@@ -32,7 +32,7 @@ triton==3.3.0; platform_system == "Linux"
 triton-windows==3.3.1.post19; platform_system == "Windows"
 prodigy-plus-schedule-free==2.0.0rc2
 kornia==0.8.1
-xformers==v0.0.30 --index-url https://download.pytorch.org/whl/cu128
+xformers==v0.0.31 --index-url https://download.pytorch.org/whl/cu128
 PyWavelets==1.8.0
 hf-xet==1.1.5
 # for kohya_ss library
