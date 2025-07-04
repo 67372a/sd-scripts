@@ -6,7 +6,7 @@ diffusers==0.34.0
 opencv-python==4.11.0.86
 einops==0.8.1
 pytorch-lightning==2.5.2
-bitsandbytes==0.46.0
+bitsandbytes==0.46.1
 prodigyopt==1.1.2
 lion-pytorch==0.2.3
 schedulefree==1.4.1
