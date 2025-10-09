@@ -3542,7 +3542,12 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Disables calculation and collection of gradient and weight norm metrics that are for reporting via tensorboard or wandb."
     )
     
-
+    parser.add_argument(
+        "--use_ramtorch",
+        action="store_true",
+        help="Use RamTorch to reduce GPU memory usage by keeping model weights on CPU.",
+    )
+    
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
     # parser.add_argument("--loraplus_text_encoder_lr_ratio", default=None, type=float, help="LoRA+ text encoder learning rate ratio")

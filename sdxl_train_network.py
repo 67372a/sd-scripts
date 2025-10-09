@@ -59,6 +59,17 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
+        if args.use_ramtorch:
+            try:
+                from library.ramtorch_util import replace_linear_with_ramtorch_linear
+                logger.info("Applying RamTorch to U-Net and Text Encoders for memory efficiency...")
+                replace_linear_with_ramtorch_linear(unet, accelerator.device)
+                replace_linear_with_ramtorch_linear(text_encoder1, accelerator.device)
+                replace_linear_with_ramtorch_linear(text_encoder2, accelerator.device)
+                logger.info("RamTorch applied successfully.")
+            except ImportError as e:
+                logger.error(f"Failed to apply RamTorch: {e}")
+
         return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, [text_encoder1, text_encoder2], vae, unet
 
     def get_tokenize_strategy(self, args):
