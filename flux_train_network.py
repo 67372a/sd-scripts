@@ -141,6 +141,17 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
         ae = flux_utils.load_ae(args.ae, weight_dtype, "cpu", disable_mmap=args.disable_mmap_load_safetensors)
 
+        if args.use_ramtorch:
+            try:
+                from library.ramtorch_util import replace_linear_with_ramtorch_linear
+                logger.info("Applying RamTorch to model and Text Encoders for memory efficiency...")
+                replace_linear_with_ramtorch_linear(model, accelerator.device)
+                replace_linear_with_ramtorch_linear(clip_l, accelerator.device)
+                replace_linear_with_ramtorch_linear(t5xxl, accelerator.device)
+                logger.info("RamTorch applied successfully.")
+            except ImportError as e:
+                logger.error(f"Failed to apply RamTorch: {e}")
+
         return flux_utils.MODEL_VERSION_FLUX_V1, [clip_l, t5xxl], ae, model
 
     def get_tokenize_strategy(self, args):
