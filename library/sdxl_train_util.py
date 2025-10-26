@@ -63,7 +63,7 @@ def load_target_model(args, accelerator, model_version: str, weight_dtype):
 
 
 def _load_target_model(
-    name_or_path: str, vae_path: Optional[str], model_version: str, weight_dtype, device="cpu", model_dtype=None, disable_mmap=False
+    name_or_path: str, vae_path: Optional[str], model_version: str, weight_dtype, device="cpu", model_dtype=None, disable_mmap=False, vae_reflection=False
 ):
     # model_dtype only work with full fp16/bf16
     name_or_path = os.readlink(name_or_path) if os.path.islink(name_or_path) else name_or_path
@@ -129,6 +129,10 @@ def _load_target_model(
     if vae_path is not None:
         vae = model_util.load_vae(vae_path, weight_dtype)
         logger.info("additional VAE loaded")
+
+    if vae_reflection:        
+        vae = vae_with_reflection(vae)        
+        logger.info("enabled reflect padding mode in VAE")
 
     return load_stable_diffusion_format, text_encoder1, text_encoder2, vae, unet, logit_scale, ckpt_info
 
@@ -378,3 +382,11 @@ def sample_images(*args, **kwargs):
     from library.sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeightingPipeline
 
     return train_util.sample_images_common(SdxlStableDiffusionLongPromptWeightingPipeline, *args, **kwargs)
+
+def vae_with_reflection(vae):    
+    for module in vae.modules():        
+        if isinstance(module, torch.nn.Conv2d):            
+            pad_h, pad_w = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)            
+            if pad_h > 0 or pad_w > 0:                
+                module.padding_mode = "reflect"    
+        return vae
