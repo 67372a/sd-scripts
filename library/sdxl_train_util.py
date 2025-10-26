@@ -47,6 +47,7 @@ def load_target_model(args, accelerator, model_version: str, weight_dtype):
                 accelerator.device if args.lowram else "cpu",
                 model_dtype,
                 args.disable_mmap_load_safetensors,
+                args.vae_reflection
             )
 
             # work on low-ram device
