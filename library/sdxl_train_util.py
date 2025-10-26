@@ -133,7 +133,6 @@ def _load_target_model(
 
     if vae_reflection:        
         vae = vae_with_reflection(vae)        
-        logger.info("enabled reflect padding mode in VAE")
 
     return load_stable_diffusion_format, text_encoder1, text_encoder2, vae, unet, logit_scale, ckpt_info
 
@@ -385,9 +384,21 @@ def sample_images(*args, **kwargs):
     return train_util.sample_images_common(SdxlStableDiffusionLongPromptWeightingPipeline, *args, **kwargs)
 
 def vae_with_reflection(vae):    
-    for module in vae.modules():        
-        if isinstance(module, torch.nn.Conv2d):            
-            pad_h, pad_w = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)            
-            if pad_h > 0 or pad_w > 0:                
-                module.padding_mode = "reflect"    
-        return vae
+    """Switch padded convolutions in a VAE to reflection padding."""
+    updated = 0
+
+    for module in vae.modules():
+        if isinstance(module, torch.nn.Conv2d):
+            if isinstance(module.padding, tuple):
+                pad_h, pad_w = module.padding
+            else:
+                pad_h = pad_w = module.padding
+            if pad_h > 0 or pad_w > 0:
+                module.padding_mode = "reflect"
+                updated += 1
+
+    if updated > 0:
+        logger.info(f"enabled reflection padding for {updated} VAE conv layers")
+    else:
+        logger.info("VAE reflection padding requested but no padded convolutions were found")
+    return vae
