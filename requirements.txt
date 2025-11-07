@@ -32,6 +32,7 @@ prodigy-plus-schedule-free~=2.0.1
 kornia~=0.8.1
 PyWavelets~=1.9.0
 hf-xet~=1.1.10
-RamTorch @ git+https://github.com/lodestone-rock/RamTorch
+RamTorch~=0.2.0
+adv_optm~=1.1.4
 # for kohya_ss library
 -e .
