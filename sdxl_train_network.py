@@ -11,6 +11,7 @@ from library import sdxl_model_util, sdxl_train_util, strategy_base, strategy_sd
 import train_network
 from library.utils import setup_logging
 from tools.stochastic_copy import to_stochastic
+from ramtorch.helpers import replace_linear_with_ramtorch
 
 setup_logging()
 import logging
@@ -54,21 +55,17 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self.logit_scale = logit_scale
         self.ckpt_info = ckpt_info
 
+        if args.use_ramtorch:
+            logger.info("Applying RamTorch to SDXL UNet, VAE, and Text Encoders.")
+            unet = replace_linear_with_ramtorch(unet, accelerator.device)
+            vae = replace_linear_with_ramtorch(vae, accelerator.device)
+            text_encoder1 = replace_linear_with_ramtorch(text_encoder1, accelerator.device)
+            text_encoder2 = replace_linear_with_ramtorch(text_encoder2, accelerator.device)
+
         # モデルに xformers とか memory efficient attention を組み込む
         train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
-
-        if args.use_ramtorch:
-            try:
-                from library.ramtorch_util import replace_linear_with_ramtorch_linear
-                logger.info("Applying RamTorch to U-Net and Text Encoders for memory efficiency...")
-                replace_linear_with_ramtorch_linear(unet, accelerator.device)
-                replace_linear_with_ramtorch_linear(text_encoder1, accelerator.device)
-                replace_linear_with_ramtorch_linear(text_encoder2, accelerator.device)
-                logger.info("RamTorch applied successfully.")
-            except ImportError as e:
-                logger.error(f"Failed to apply RamTorch: {e}")
 
         return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, [text_encoder1, text_encoder2], vae, unet
 
