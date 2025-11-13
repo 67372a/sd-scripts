@@ -8,6 +8,7 @@ import torch
 from accelerate import Accelerator
 from library import sd3_models, strategy_sd3, utils
 from library.device_utils import init_ipex, clean_memory_on_device
+from ramtorch.helpers import replace_linear_with_ramtorch
 
 init_ipex()
 
@@ -129,6 +130,24 @@ class Sd3NetworkTrainer(train_network.NetworkTrainer):
         vae = sd3_utils.load_vae(
             args.vae, weight_dtype, "cpu", disable_mmap=args.disable_mmap_load_safetensors, state_dict=state_dict
         )
+
+        if args.use_ramtorch:
+            logger.info("Applying RamTorch to SD3 mmdit, VAE, and Text Encoders (clip l, clip g, t5xxl).")
+            if isinstance(mmdit, torch.nn.Module):
+                mmdit = replace_linear_with_ramtorch(mmdit, accelerator.device)
+                logger.info("RamTorch applied to SD3 mmdit.")
+
+            if isinstance(clip_l, torch.nn.Module):
+                clip_l = replace_linear_with_ramtorch(clip_l, accelerator.device)
+                logger.info("RamTorch applied to SD3 Clip-L.")
+
+            if isinstance(clip_g, torch.nn.Module):
+                clip_g = replace_linear_with_ramtorch(clip_g, accelerator.device)
+                logger.info("RamTorch applied to SD3 Clip-G.")
+
+            if isinstance(t5xxl, torch.nn.Module):
+                t5xxl = replace_linear_with_ramtorch(t5xxl, accelerator.device)
+                logger.info("RamTorch applied to SD3 t5xxl.")
 
         return mmdit.model_type, [clip_l, clip_g, t5xxl], vae, mmdit
 

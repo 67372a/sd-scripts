@@ -31,6 +31,7 @@ from accelerate.utils import set_seed
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
 from library import deepspeed_utils, model_util, strategy_base, strategy_sd
+from ramtorch.helpers import replace_linear_with_ramtorch
 
 import library.train_util as train_util
 from library.train_util import DreamBoothDataset
@@ -310,6 +311,20 @@ class NetworkTrainer:
 
     def load_target_model(self, args, weight_dtype, accelerator):
         text_encoder, vae, unet, _ = train_util.load_target_model(args, weight_dtype, accelerator)
+
+        if args.use_ramtorch:
+            logger.info("Applying RamTorch to SD UNet, VAE, and Clip-L.")
+            if isinstance(unet, torch.nn.Module):
+                unet = replace_linear_with_ramtorch(unet, accelerator.device)
+                logger.info("RamTorch applied to SD unet.")
+
+            if isinstance(text_encoder, torch.nn.Module):
+                text_encoder = replace_linear_with_ramtorch(text_encoder, accelerator.device)
+                logger.info("RamTorch applied to SD Clip-L.")
+
+            if isinstance(vae, torch.nn.Module):
+                vae = replace_linear_with_ramtorch(vae, accelerator.device)
+                logger.info("RamTorch applied to SD VAE.")
 
         # モデルに xformers とか memory efficient attention を組み込む
         train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
