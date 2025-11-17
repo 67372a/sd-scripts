@@ -11,7 +11,6 @@ from library import sdxl_model_util, sdxl_train_util, strategy_base, strategy_sd
 import train_network
 from library.utils import setup_logging
 from tools.stochastic_copy import to_stochastic
-from ramtorch.helpers import replace_linear_with_ramtorch
 
 setup_logging()
 import logging
