@@ -1974,6 +1974,11 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Uses float64 for edm2 loss weighting."
     )
 
+    parser.add_argument(
+        "--use_ramtorch",
+        action="store_true",
+        help="Use RamTorch to reduce GPU memory usage by keeping base/original linear model weights in system RAM.",
+    )
 
     return parser
 

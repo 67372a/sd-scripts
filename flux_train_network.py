@@ -9,7 +9,7 @@ from accelerate import Accelerator
 
 from library.device_utils import clean_memory_on_device, init_ipex
 from library.strategy_flux import move_vision_encoder_to_device
-from ramtorch.helpers import replace_linear_with_ramtorch
+from library.ramtorch_util import apply_ramtorch_to_module
 
 init_ipex()
 
@@ -143,23 +143,11 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         ae = flux_utils.load_ae(args.ae, weight_dtype, "cpu", disable_mmap=args.disable_mmap_load_safetensors)
 
         if args.use_ramtorch:
-            logger.info("Applying RamTorch to FLUX models (DiT, T5-XXL, CLIP-L, AE).")
-            if isinstance(model, torch.nn.Module):
-                model = replace_linear_with_ramtorch(model, accelerator.device)
-                logger.info("RamTorch applied to FLUX DiT.")
-
-            if isinstance(clip_l, torch.nn.Module):
-                clip_l = replace_linear_with_ramtorch(clip_l, accelerator.device)
-                logger.info("RamTorch applied to FLUX Clip-L.")
-
-            if isinstance(t5xxl, torch.nn.Module):
-                t5xxl = replace_linear_with_ramtorch(t5xxl, accelerator.device)
-                logger.info("RamTorch applied to FLUX t5xxl.")
-
-            if isinstance(ae, torch.nn.Module):
-                ae = replace_linear_with_ramtorch(ae, accelerator.device)
-                logger.info("RamTorch applied to FLUX AE/autoencoder.")
-
+            logger.info("Applying RamTorch to FLUX model.")
+            model = apply_ramtorch_to_module(model, "unet/dit", accelerator.device)
+            ae = apply_ramtorch_to_module(ae, "ae", accelerator.device)
+            clip_l = apply_ramtorch_to_module(clip_l, "clip_l", accelerator.device)
+            t5xxl = apply_ramtorch_to_module(t5xxl, "t5xxl", accelerator.device)
 
         return flux_utils.MODEL_VERSION_FLUX_V1, [clip_l, t5xxl], ae, model
 

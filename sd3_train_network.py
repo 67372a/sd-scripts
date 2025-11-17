@@ -8,7 +8,7 @@ import torch
 from accelerate import Accelerator
 from library import sd3_models, strategy_sd3, utils
 from library.device_utils import init_ipex, clean_memory_on_device
-from ramtorch.helpers import replace_linear_with_ramtorch
+from library.ramtorch_util import apply_ramtorch_to_module
 
 init_ipex()
 
@@ -132,22 +132,12 @@ class Sd3NetworkTrainer(train_network.NetworkTrainer):
         )
 
         if args.use_ramtorch:
-            logger.info("Applying RamTorch to SD3 mmdit, VAE, and Text Encoders (clip l, clip g, t5xxl).")
-            if isinstance(mmdit, torch.nn.Module):
-                mmdit = replace_linear_with_ramtorch(mmdit, accelerator.device)
-                logger.info("RamTorch applied to SD3 mmdit.")
-
-            if isinstance(clip_l, torch.nn.Module):
-                clip_l = replace_linear_with_ramtorch(clip_l, accelerator.device)
-                logger.info("RamTorch applied to SD3 Clip-L.")
-
-            if isinstance(clip_g, torch.nn.Module):
-                clip_g = replace_linear_with_ramtorch(clip_g, accelerator.device)
-                logger.info("RamTorch applied to SD3 Clip-G.")
-
-            if isinstance(t5xxl, torch.nn.Module):
-                t5xxl = replace_linear_with_ramtorch(t5xxl, accelerator.device)
-                logger.info("RamTorch applied to SD3 t5xxl.")
+            logger.info("Applying RamTorch to SD3 model.")
+            mmdit = apply_ramtorch_to_module(mmdit, "unet/dit", accelerator.device)
+            ae = apply_ramtorch_to_module(ae, "ae", accelerator.device)
+            clip_l = apply_ramtorch_to_module(clip_l, "clip_l", accelerator.device)
+            clip_g = apply_ramtorch_to_module(clip_g, "clip_g", accelerator.device)
+            t5xxl = apply_ramtorch_to_module(t5xxl, "t5xxl", accelerator.device)
 
         return mmdit.model_type, [clip_l, clip_g, t5xxl], vae, mmdit
 

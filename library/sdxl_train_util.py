@@ -59,6 +59,13 @@ def load_target_model(args, accelerator, model_version: str, weight_dtype):
             clean_memory_on_device(accelerator.device)
         accelerator.wait_for_everyone()
 
+    if args.use_ramtorch:
+        logger.info("Applying RamTorch to SDXL model.")
+        unet = apply_ramtorch_to_module(unet, "unet", accelerator.device)
+        vae = apply_ramtorch_to_module(vae, "vae", accelerator.device)
+        text_encoder1 = apply_ramtorch_to_module(text_encoder1, "clip_l", accelerator.device)
+        text_encoder2 = apply_ramtorch_to_module(text_encoder2, "clip_g", accelerator.device)
+
     return load_stable_diffusion_format, text_encoder1, text_encoder2, vae, unet, logit_scale, ckpt_info
 
 

@@ -31,7 +31,7 @@ from accelerate.utils import set_seed
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
 from library import deepspeed_utils, model_util, strategy_base, strategy_sd
-from ramtorch.helpers import replace_linear_with_ramtorch
+from library.ramtorch_util import apply_ramtorch_to_module
 
 import library.train_util as train_util
 from library.train_util import DreamBoothDataset
@@ -313,18 +313,10 @@ class NetworkTrainer:
         text_encoder, vae, unet, _ = train_util.load_target_model(args, weight_dtype, accelerator)
 
         if args.use_ramtorch:
-            logger.info("Applying RamTorch to SD UNet, VAE, and Clip-L.")
-            if isinstance(unet, torch.nn.Module):
-                unet = replace_linear_with_ramtorch(unet, accelerator.device)
-                logger.info("RamTorch applied to SD unet.")
-
-            if isinstance(text_encoder, torch.nn.Module):
-                text_encoder = replace_linear_with_ramtorch(text_encoder, accelerator.device)
-                logger.info("RamTorch applied to SD Clip-L.")
-
-            if isinstance(vae, torch.nn.Module):
-                vae = replace_linear_with_ramtorch(vae, accelerator.device)
-                logger.info("RamTorch applied to SD VAE.")
+            logger.info("Applying RamTorch to SD model.")
+            unet = apply_ramtorch_to_module(unet, "unet", accelerator.device)
+            vae = apply_ramtorch_to_module(vae, "vae", accelerator.device)
+            text_encoder = apply_ramtorch_to_module(text_encoder, "clip_l", accelerator.device)
 
         # モデルに xformers とか memory efficient attention を組み込む
         train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
@@ -1096,6 +1088,36 @@ class NetworkTrainer:
             optimizer_init_sig_parameters = {}
 
         apply_orthograd = any(optimizer_kwargs.get(key, getattr(optimizer_init_sig_parameters.get(key, types.SimpleNamespace()), "default", False)) == True for key in ['use_orthograd', 'orthograd'])
+
+        if "state_storage_dtype" in optimizer_init_sig_parameters:
+            logger.info("state_storage_dtype in optimizer signature.")
+            if "state_storage_dtype" in optimizer_kwargs:
+                state_storage_dtype_arg = optimizer_kwargs.get("state_storage_dtype")
+                logger.info(f"state_storage_dtype set to '{state_storage_dtype_arg}' via supplied args.")
+            else:
+                if args.mixed_precision == "fp16":
+                    optimizer_kwargs["state_storage_dtype"] = "float16"
+                elif args.mixed_precision == "bf16":
+                    optimizer_kwargs["state_storage_dtype"] = "bfloat16"
+                else:
+                    optimizer_kwargs["state_storage_dtype"] = "float32"
+
+                state_storage_dtype_arg = optimizer_kwargs["state_storage_dtype"]
+                logger.info(f"Defaulting state_storage_dtype to training mixed precision, '{state_storage_dtype_arg}'")
+
+        if "state_storage_device" in optimizer_init_sig_parameters:
+            logger.info("state_storage_device in optimizer signature.")
+            if "state_storage_device" in optimizer_kwargs:
+                state_storage_device_arg = optimizer_kwargs.get("state_storage_device")
+                logger.info(f"state_storage_device set to '{state_storage_device_arg}' via supplied args.")
+            else:
+                # Use logic to determine the default storage device
+                if args.use_ramtorch_network:
+                    logger.info(f"Defaulting state_storage_device to 'cpu' as args.use_ramtorch_network is True.")
+                    optimizer_kwargs["state_storage_device"] = "cpu"
+                else:
+                    logger.info(f"Defaulting state_storage_device to accelerator device '{accelerator.device}'.")
+                    optimizer_kwargs["state_storage_device"] = accelerator.device
 
         # make backward compatibility for text_encoder_lr
         support_multiple_lrs = hasattr(network, "prepare_optimizer_params_with_multiple_te_lrs")
@@ -3561,6 +3583,13 @@ def setup_parser() -> argparse.ArgumentParser:
         "--use_ramtorch",
         action="store_true",
         help="Use RamTorch to reduce GPU memory usage by keeping model weights on CPU.",
+    )
+
+    parser.add_argument(
+        "--use_ramtorch_network",
+        action="store_true",
+        help="Use RamTorch to reduce GPU memory usage by keeping network/lora linear weights in system RAM. " \
+        "Requires use of optimizers that have been modified to support it, currently only SimplifiedAdEMAMixExM and OCGOpt.",
     )
     
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
