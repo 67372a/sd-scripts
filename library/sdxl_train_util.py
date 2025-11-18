@@ -13,6 +13,7 @@ from tqdm import tqdm
 from transformers import CLIPTokenizer
 from library import model_util, sdxl_model_util, train_util, sdxl_original_unet
 from .utils import setup_logging
+from library.ramtorch_util import apply_ramtorch_to_module
 
 setup_logging()
 import logging
