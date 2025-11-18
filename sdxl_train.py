@@ -1980,6 +1980,12 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Use RamTorch to reduce GPU memory usage by keeping base/original linear model weights in system RAM.",
     )
 
+    parser.add_argument(        
+        "--vae_reflection",        
+        action="store_true",        
+        help="Enables reflect padding mode in the conv layers of the VAE"    
+    )
+
     return parser
 
 
