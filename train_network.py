@@ -328,6 +328,14 @@ class NetworkTrainer:
         fixed_timesteps=None,
         is_train=True,
     ):
+        # ADDifT dual-pass logic
+        if getattr(args, "addift", False) and batch.get("addift_target_latents") is not None:
+            return self.get_noise_pred_and_target_addift(
+                args, accelerator, noise_scheduler, latents, batch,
+                text_encoder_conds, text_encoder_masks, unet, network,
+                weight_dtype, train_unet, is_train,
+            )
+
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
         encoder_attention_mask_bias = text_encoder_masks[1] #[(1 - t.to(dtype=text_encoder_conds[0].dtype)).unsqueeze(1) * -10000.0 for t in text_encoder_masks]
@@ -405,6 +413,99 @@ class NetworkTrainer:
                 target[diff_output_pr_indices] = noise_pred_prior.to(target.dtype)
 
         return noise_pred, target, timesteps, None, noise
+
+    def get_noise_pred_and_target_addift(
+        self,
+        args,
+        accelerator,
+        noise_scheduler,
+        latents,
+        batch,
+        text_encoder_conds,
+        text_encoder_masks,
+        unet,
+        network,
+        weight_dtype,
+        train_unet,
+        is_train=True,
+    ):
+        """
+        ADDifT (Additive Difference Transfer) dual-pass training logic.
+
+        Even steps: noise original → UNet(network OFF) = target; noise target → UNet(network ON, +mult) = prediction
+        Odd steps:  noise target → UNet(network OFF) = target; noise original → UNet(network ON, -mult*alt) = prediction
+        Loss = MSE(prediction, target)
+        """
+        encoder_attention_mask_bias = text_encoder_masks[1]
+        target_latents = batch["addift_target_latents"]
+
+        # Determine step parity
+        if not hasattr(self, "_addift_step_counter"):
+            self._addift_step_counter = 0
+        turn = self._addift_step_counter % 2 == 0
+        self._addift_step_counter += 1
+
+        addift_multiplier = getattr(args, "addift_multiplier", 0.25)
+        addift_alt_ratio = getattr(args, "addift_alt_ratio", 1.0)
+
+        batch_size = latents.shape[0]
+
+        # Sample noise and timesteps using the full utility (handles noise_offset, multires_noise,
+        # min/max_timestep, timestep_distribution, etc.). We discard the returned noisy_latents
+        # and create both source/target noisy versions ourselves so both use identical noise.
+        # Note: ip_noise_gamma is intentionally skipped to keep source and target aligned.
+        noise, _, timesteps = train_util.get_noise_noisy_latents_and_timesteps(
+            args, noise_scheduler, latents, is_train=is_train,
+        )
+
+        if turn:
+            # Even step: noise original for baseline, noise target for network prediction
+            orig_noisy = noise_scheduler.add_noise(latents, noise, timesteps)
+            targ_noisy = noise_scheduler.add_noise(target_latents, noise, timesteps)
+            active_multiplier = addift_multiplier
+        else:
+            # Odd step: noise target for baseline, noise original for network prediction
+            orig_noisy = noise_scheduler.add_noise(target_latents, noise, timesteps)
+            targ_noisy = noise_scheduler.add_noise(latents, noise, timesteps)
+            active_multiplier = -addift_multiplier * abs(addift_alt_ratio)
+
+        # Move alphas_cumprod back to CPU (add_noise may move it to GPU in some diffusers versions)
+        if hasattr(noise_scheduler, "alphas_cumprod"):
+            noise_scheduler.alphas_cumprod = noise_scheduler.alphas_cumprod.cpu()
+
+        # ensure the hidden state will require grad
+        if is_train and args.gradient_checkpointing:
+            for x in [orig_noisy, targ_noisy]:
+                x.requires_grad_(True)
+            for t in text_encoder_conds:
+                t.requires_grad_(True)
+
+        self.apply_tlora_mask(timesteps)
+
+        # Pass 1: Network OFF → baseline prediction (no grad)
+        network.set_multiplier(0.0)
+        with torch.no_grad(), accelerator.autocast():
+            orig_noise_pred = self.call_unet(
+                args, accelerator, unet, orig_noisy, timesteps,
+                text_encoder_conds, encoder_attention_mask_bias, batch, weight_dtype,
+            )
+
+        # Pass 2: Network ON at ADDifT multiplier → active prediction (with grad)
+        network.set_multiplier(active_multiplier)
+        with torch.set_grad_enabled(is_train), accelerator.autocast():
+            targ_noise_pred = self.call_unet(
+                args, accelerator, unet, targ_noisy.requires_grad_(train_unet), timesteps,
+                text_encoder_conds, encoder_attention_mask_bias, batch, weight_dtype,
+            )
+
+        # Reset network multiplier
+        network.set_multiplier(0.0)
+
+        self.clear_tlora_mask_if_needed()
+
+        # noise_pred = network active prediction, target = baseline prediction
+        # Loss will be computed as MSE(noise_pred, target) in process_batch
+        return targ_noise_pred, orig_noise_pred.detach(), timesteps, None, noise
 
     def post_process_loss(self, loss, args, timesteps: torch.IntTensor, noise_scheduler) -> torch.FloatTensor:
         if args.min_snr_gamma:
@@ -562,6 +663,19 @@ class NetworkTrainer:
                     latents = typing.cast(torch.FloatTensor, torch.nan_to_num(latents, 0, out=latents))
 
             latents = self.shift_scale_latents(args, latents)
+
+            # ADDifT: encode target images to latents if not already cached
+            if getattr(args, "addift", False):
+                if batch.get("addift_target_latents") is not None:
+                    batch["addift_target_latents"] = self.shift_scale_latents(
+                        args, batch["addift_target_latents"].to(device=accelerator.device)
+                    )
+                elif batch.get("addift_target_images") is not None:
+                    target_latents = self.encode_images_to_latents(
+                        args, vae, batch["addift_target_images"].to(device=accelerator.device, dtype=vae_dtype)
+                    )
+                    batch["addift_target_latents"] = self.shift_scale_latents(args, target_latents)
+                    batch["addift_target_images"] = None  # free memory
 
         text_encoder_conds = []
         masks_reshaped = []
@@ -2743,6 +2857,25 @@ def setup_parser() -> argparse.ArgumentParser:
         type=bool,
         default=False,
         help="For full caption dropout, use zero conditioning instead of empty caption"
+    )
+    parser.add_argument(
+        "--addift",
+        action="store_true",
+        help="Enable ADDifT (Additive Difference Transfer) training. Requires subsets to specify addift_target_image_dir. "
+        "The network learns by comparing UNet predictions on original images (network off) vs target images (network on).",
+    )
+    parser.add_argument(
+        "--addift_multiplier",
+        type=float,
+        default=0.25,
+        help="Network multiplier used during the ADDifT active forward pass (default: 0.25).",
+    )
+    parser.add_argument(
+        "--addift_alt_ratio",
+        type=float,
+        default=1.0,
+        help="Ratio for the negative multiplier on alternating (odd) ADDifT steps (default: 1.0). "
+        "On odd steps the network runs at -addift_multiplier * addift_alt_ratio with swapped latents.",
     )
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")

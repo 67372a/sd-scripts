@@ -275,6 +275,14 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         fixed_timesteps=None,
         is_train=True,
     ):
+        # ADDifT dual-pass logic
+        if getattr(args, "addift", False) and batch.get("addift_target_latents") is not None:
+            return self.get_noise_pred_and_target_addift(
+                args, accelerator, noise_scheduler, latents, batch,
+                text_encoder_conds, text_encoder_masks, unet, network,
+                weight_dtype, train_unet, is_train,
+            )
+
         anima: anima_models.Anima = unet
 
         # Sample noise
@@ -348,6 +356,129 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
 
         return model_pred, target, timesteps, weighting, noise
+
+    def get_noise_pred_and_target_addift(
+        self,
+        args,
+        accelerator,
+        noise_scheduler,
+        latents,
+        batch,
+        text_encoder_conds,
+        text_encoder_masks,
+        unet,
+        network,
+        weight_dtype,
+        train_unet,
+        is_train=True,
+    ):
+        """
+        ADDifT dual-pass for Anima (flow matching).
+
+        Even steps: noisy original → model(network OFF) = baseline; noisy target → model(network ON, +mult) = prediction
+        Odd steps:  noisy target → model(network OFF) = baseline; noisy original → model(network ON, -mult*alt) = prediction
+        """
+        anima: anima_models.Anima = unet
+        target_latents = batch["addift_target_latents"]
+
+        if latents.ndim == 5:
+            latents = latents.squeeze(2)
+        if target_latents.ndim == 5:
+            target_latents = target_latents.squeeze(2)
+
+        # Determine step parity
+        if not hasattr(self, "_addift_step_counter"):
+            self._addift_step_counter = 0
+        turn = self._addift_step_counter % 2 == 0
+        self._addift_step_counter += 1
+
+        addift_multiplier = getattr(args, "addift_multiplier", 0.25)
+        addift_alt_ratio = getattr(args, "addift_alt_ratio", 1.0)
+
+        # Sample noise and get timesteps/sigmas via the flow matching utility.
+        # We discard the returned noisy_model_input and create both versions ourselves
+        # so that both source and target use identical noise. ip_noise_gamma is intentionally
+        # skipped to keep source and target aligned.
+        noise = torch.randn_like(latents)
+        _, timesteps_raw, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
+            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype,
+            is_train=is_train,
+        )
+
+        self.apply_tlora_mask(timesteps_raw)
+        timesteps = timesteps_raw / 1000.0  # scale to [0, 1]
+
+        # Create noisy inputs for both source and target using flow matching formula
+        sigmas_view = sigmas.view(-1, 1, 1, 1)
+        noisy_orig = (1.0 - sigmas_view) * latents + sigmas_view * noise
+        noisy_targ = (1.0 - sigmas_view) * target_latents + sigmas_view * noise
+
+        if turn:
+            baseline_noisy = noisy_orig.to(dtype=weight_dtype, device=accelerator.device)
+            active_noisy = noisy_targ.to(dtype=weight_dtype, device=accelerator.device)
+            active_multiplier = addift_multiplier
+        else:
+            baseline_noisy = noisy_targ.to(dtype=weight_dtype, device=accelerator.device)
+            active_noisy = noisy_orig.to(dtype=weight_dtype, device=accelerator.device)
+            active_multiplier = -addift_multiplier * abs(addift_alt_ratio)
+
+        # Gradient checkpointing support
+        if args.gradient_checkpointing:
+            for x in [baseline_noisy, active_noisy]:
+                x.requires_grad_(True)
+            for t in text_encoder_conds:
+                if t is not None and t.dtype.is_floating_point:
+                    t.requires_grad_(True)
+
+        # Unpack text encoder conditions
+        prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoder_conds
+        prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
+        attn_mask = attn_mask.to(accelerator.device)
+        t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
+        t5_attn_mask = t5_attn_mask.to(accelerator.device)
+
+        # Create padding mask
+        bs = latents.shape[0]
+        h_latent, w_latent = latents.shape[-2], latents.shape[-1]
+        padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=weight_dtype, device=accelerator.device)
+
+        # Pass 1: Network OFF → baseline prediction (no grad)
+        network.set_multiplier(0.0)
+        baseline_5d = baseline_noisy.unsqueeze(2)
+        with torch.no_grad(), accelerator.autocast():
+            baseline_pred = anima(
+                baseline_5d, timesteps, prompt_embeds,
+                padding_mask=padding_mask,
+                target_input_ids=t5_input_ids,
+                target_attention_mask=t5_attn_mask,
+                source_attention_mask=attn_mask,
+            )
+        baseline_pred = baseline_pred.squeeze(2)
+
+        # Pass 2: Network ON at ADDifT multiplier → active prediction (with grad)
+        network.set_multiplier(active_multiplier)
+        active_5d = active_noisy.unsqueeze(2)
+        if train_unet:
+            active_5d.requires_grad_(True)
+        with torch.set_grad_enabled(is_train), accelerator.autocast():
+            active_pred = anima(
+                active_5d, timesteps, prompt_embeds,
+                padding_mask=padding_mask,
+                target_input_ids=t5_input_ids,
+                target_attention_mask=t5_attn_mask,
+                source_attention_mask=attn_mask,
+            )
+        active_pred = active_pred.squeeze(2)
+
+        # Reset network multiplier
+        network.set_multiplier(0.0)
+        self.clear_tlora_mask_if_needed()
+
+        # Loss weighting
+        weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
+
+        # noise_pred = active prediction, target = baseline prediction (detached)
+        return active_pred, baseline_pred.detach(), timesteps, weighting, noise
 
     def process_batch(
         self, 

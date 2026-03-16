@@ -605,7 +605,7 @@ class LatentsCachingStrategy:
         """
         from library import train_util  # import here to avoid circular import
 
-        img_tensor, alpha_masks, original_sizes, crop_ltrbs = train_util.load_images_and_masks_for_caching(
+        img_tensor, alpha_masks, original_sizes, crop_ltrbs, crop_offsets_list = train_util.load_images_and_masks_for_caching(
             image_infos, apply_alpha_mask, random_crop, random_crop_padding_percent=random_crop_padding_percent
         )
         img_tensor = img_tensor.to(device=vae_device, dtype=vae_dtype)
@@ -627,6 +627,7 @@ class LatentsCachingStrategy:
             alpha_mask = alpha_masks[i]
             original_size = original_sizes[i]
             crop_ltrb = crop_ltrbs[i]
+            crop_offs = crop_offsets_list[i]
 
             latents_size = latents.shape[-2:]  # H, W (supports both 4D and 5D latents)
             key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}" if multi_resolution else ""  # e.g. "_32x64", HxW
@@ -642,6 +643,40 @@ class LatentsCachingStrategy:
                 if flip_aug:
                     info.latents_flipped = flipped_latent
                 info.alpha_mask = alpha_mask
+                info._crop_offsets = crop_offs  # store for ADDifT target alignment
+
+        # ADDifT: cache target image latents for images that have addift_target_absolute_path
+        addift_infos = [info for info in image_infos if getattr(info, "addift_target_absolute_path", None) is not None]
+        if addift_infos and not self.cache_to_disk:
+            target_images = []
+            for info in addift_infos:
+                target_img = train_util.load_image(info.addift_target_absolute_path, False)
+                source_offsets = getattr(info, '_crop_offsets', None)
+                target_img, _, _, _ = train_util.trim_and_resize_if_required(
+                    random_crop, target_img, info.bucket_reso, info.resized_size,
+                    resize_interpolation=info.resize_interpolation,
+                    random_crop_padding_percent=random_crop_padding_percent,
+                    crop_offsets=source_offsets,
+                )
+                target_img = target_img[:, :, :3]
+                target_img = train_util.IMAGE_TRANSFORMS(target_img)
+                target_images.append(target_img)
+
+            target_tensor = torch.stack(target_images, dim=0).to(device=vae_device, dtype=vae_dtype)
+            with torch.no_grad():
+                target_latents = encode_by_vae(target_tensor).to("cpu")
+
+            if flip_aug:
+                target_tensor = torch.flip(target_tensor, dims=[3])
+                with torch.no_grad():
+                    target_flipped = encode_by_vae(target_tensor).to("cpu")
+            else:
+                target_flipped = [None] * len(target_latents)
+
+            for info, t_lat, t_flip in zip(addift_infos, target_latents, target_flipped):
+                info.addift_target_latents = t_lat
+                if flip_aug and t_flip is not None:
+                    info.addift_target_latents_flipped = t_flip
 
     def load_latents_from_disk(
         self, npz_path: str, bucket_reso: Tuple[int, int]

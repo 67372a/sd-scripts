@@ -224,6 +224,13 @@ class ImageInfo:
         self.alpha_mask: Optional[torch.Tensor] = None  # alpha mask can be flipped in runtime
         self.resize_interpolation: Optional[str] = None
 
+        # ADDifT target image fields
+        self.addift_target_absolute_path: Optional[str] = None
+        self.addift_target_latents: Optional[torch.Tensor] = None
+        self.addift_target_latents_flipped: Optional[torch.Tensor] = None
+        self.addift_target_latents_npz: Optional[str] = None
+        self.addift_target_image: Optional[Image.Image] = None
+
 
 class BucketManager:
     def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps, multires_training=False) -> None:
@@ -470,6 +477,7 @@ class BaseSubset:
         validation_seed: Optional[int] = None,
         validation_split: Optional[float] = 0.0,
         resize_interpolation: Optional[str] = None,
+        addift_target_image_dir: Optional[str] = None,
     ) -> None:
         self.image_dir = image_dir
         self.alpha_mask = alpha_mask if alpha_mask is not None else False
@@ -506,6 +514,7 @@ class BaseSubset:
         self.validation_split = float(validation_split) if validation_split is not None else 0.0
 
         self.resize_interpolation = resize_interpolation
+        self.addift_target_image_dir = addift_target_image_dir
 
 
 class DreamBoothSubset(BaseSubset):
@@ -545,6 +554,7 @@ class DreamBoothSubset(BaseSubset):
         validation_seed: Optional[int] = None,
         validation_split: Optional[float] = 0.0,
         resize_interpolation: Optional[str] = None,
+        addift_target_image_dir: Optional[str] = None,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -578,6 +588,7 @@ class DreamBoothSubset(BaseSubset):
             validation_seed=validation_seed,
             validation_split=validation_split,
             resize_interpolation=resize_interpolation,
+            addift_target_image_dir=addift_target_image_dir,
         )
 
         self.is_reg = is_reg
@@ -627,6 +638,7 @@ class FineTuningSubset(BaseSubset):
         validation_seed: Optional[int] = None,
         validation_split: Optional[float] = 0.0,
         resize_interpolation: Optional[str] = None,
+        addift_target_image_dir: Optional[str] = None,
     ) -> None:
         assert metadata_file is not None, "metadata_file must be specified / metadata_fileは指定が必須です"
 
@@ -660,6 +672,7 @@ class FineTuningSubset(BaseSubset):
             validation_seed=validation_seed,
             validation_split=validation_split,
             resize_interpolation=resize_interpolation,
+            addift_target_image_dir=addift_target_image_dir,
         )
 
         self.metadata_file = metadata_file
@@ -704,6 +717,7 @@ class ControlNetSubset(BaseSubset):
         validation_seed: Optional[int] = None,
         validation_split: Optional[float] = 0.0,
         resize_interpolation: Optional[str] = None,
+        addift_target_image_dir: Optional[str] = None,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -737,6 +751,7 @@ class ControlNetSubset(BaseSubset):
             validation_seed=validation_seed,
             validation_split=validation_split,
             resize_interpolation=resize_interpolation,
+            addift_target_image_dir=addift_target_image_dir,
         )
 
         self.conditioning_data_dir = conditioning_data_dir
@@ -1706,6 +1721,8 @@ class BaseDataset(torch.utils.data.Dataset):
         flippeds = []  # 変数名が微妙
         text_encoder_outputs_list = []
         custom_attributes = []
+        addift_target_latents_list = []
+        addift_target_images_list = []
 
         for image_key in bucket[image_index : image_index + bucket_batch_size]:
             image_info = self.image_data[image_key]
@@ -1751,7 +1768,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 im_h, im_w = img.shape[0:2]
 
                 if self.enable_bucket:
-                    img, original_size, crop_ltrb = trim_and_resize_if_required(
+                    img, original_size, crop_ltrb, source_crop_offsets = trim_and_resize_if_required(
                         subset.random_crop,
                         img,
                         image_info.bucket_reso,
@@ -1811,6 +1828,36 @@ class BaseDataset(torch.utils.data.Dataset):
             images.append(image)
             latents_list.append(latents)
             alpha_mask_list.append(alpha_mask)
+
+            # ADDifT: collect target latents/images
+            if image_info.addift_target_latents is not None:
+                if not flipped:
+                    addift_target_latents_list.append(image_info.addift_target_latents)
+                else:
+                    addift_target_latents_list.append(
+                        image_info.addift_target_latents_flipped if image_info.addift_target_latents_flipped is not None
+                        else image_info.addift_target_latents
+                    )
+                addift_target_images_list.append(None)
+            elif image_info.addift_target_absolute_path is not None:
+                # Not cached yet - load raw image for runtime VAE encoding
+                target_img = load_image(image_info.addift_target_absolute_path, False)
+                target_crop_offsets = source_crop_offsets if self.enable_bucket else None
+                target_img, _, _, _ = trim_and_resize_if_required(
+                    subset.random_crop, target_img, image_info.bucket_reso, image_info.resized_size,
+                    resize_interpolation=image_info.resize_interpolation,
+                    random_crop_padding_percent=subset.random_crop_padding_percent,
+                    crop_offsets=target_crop_offsets,
+                )
+                target_img = target_img[:, :, :3]
+                if flipped:
+                    target_img = target_img[:, ::-1, :].copy()
+                target_img = self.image_transforms(target_img)
+                addift_target_latents_list.append(None)
+                addift_target_images_list.append(target_img)
+            else:
+                addift_target_latents_list.append(None)
+                addift_target_images_list.append(None)
 
             target_size = (image.shape[2], image.shape[1]) if image is not None else (latents.shape[2] * 8, latents.shape[1] * 8)
 
@@ -1962,6 +2009,17 @@ class BaseDataset(torch.utils.data.Dataset):
         example["flippeds"] = flippeds
 
         example["network_multipliers"] = torch.FloatTensor([self.network_multiplier] * len(captions))
+
+        # ADDifT target latents/images
+        if any(x is not None for x in addift_target_latents_list):
+            example["addift_target_latents"] = torch.stack(addift_target_latents_list)
+        else:
+            example["addift_target_latents"] = None
+        if any(x is not None for x in addift_target_images_list):
+            target_imgs = torch.stack(addift_target_images_list)
+            example["addift_target_images"] = target_imgs.to(memory_format=torch.contiguous_format).float()
+        else:
+            example["addift_target_images"] = None
 
         if self.debug_dataset:
             example["image_keys"] = bucket[image_index : image_index + self.batch_size]
@@ -2305,6 +2363,15 @@ class DreamBoothDataset(BaseDataset):
             else:
                 num_train_images += num_repeats * len(img_paths)
 
+            # Build ADDifT target image lookup if target dir is specified
+            addift_target_map = {}
+            if subset.addift_target_image_dir and os.path.isdir(subset.addift_target_image_dir):
+                target_paths = glob_images(subset.addift_target_image_dir, "*")
+                for tp in target_paths:
+                    stem = os.path.splitext(os.path.basename(tp))[0]
+                    addift_target_map[stem] = tp
+                logger.info(f"ADDifT: found {len(addift_target_map)} target images in {subset.addift_target_image_dir}")
+
             for img_path, caption, size in zip(img_paths, captions, sizes):
                 info = ImageInfo(img_path, num_repeats, caption, subset.is_reg, subset.is_val, img_path, subset.caption_dropout_rate)
                 info.resize_interpolation = (
@@ -2312,6 +2379,15 @@ class DreamBoothDataset(BaseDataset):
                 )
                 if size is not None:
                     info.image_size = size
+
+                # Pair with ADDifT target image by filename stem
+                if addift_target_map:
+                    src_stem = os.path.splitext(os.path.basename(img_path))[0]
+                    if src_stem in addift_target_map:
+                        info.addift_target_absolute_path = addift_target_map[src_stem]
+                    else:
+                        logger.warning(f"ADDifT: no matching target image for {img_path}")
+
                 if subset.is_reg:
                     reg_infos.append((info, subset))
                 elif subset.is_val:
@@ -3144,15 +3220,14 @@ def load_image(image_path, alpha=False):
                     image = image.convert("RGB")
             img = np.array(image, np.uint8)
             return img
-    except (IOError, OSError) as e:
-        logger.error(f"Error loading file: {image_path}")
-        raise e
+    except Exception as e:
+        raise RuntimeError(f"Could not load image: {image_path}") from e
 
 
-# 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top, crop right, crop bottom)
 def trim_and_resize_if_required(
-    random_crop: bool, image: np.ndarray, reso, resized_size: Tuple[int, int], resize_interpolation: Optional[str] = None, random_crop_padding_percent: float = 0.05
-) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int, int, int]]:
+    random_crop: bool, image: np.ndarray, reso, resized_size: Tuple[int, int], resize_interpolation: Optional[str] = None,
+    random_crop_padding_percent: float = 0.05, crop_offsets: Optional[Tuple[int, int]] = None,
+) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int, int, int], Tuple[int, int]]:
     image_height, image_width = image.shape[0:2]
     original_size = (image_width, image_height)  # size before resize
 
@@ -3164,53 +3239,62 @@ def trim_and_resize_if_required(
 
     image_height, image_width = image.shape[0:2]
 
+    p_w, p_h = 0, 0
     if image_width > reso[0]:
         trim_size = image_width - reso[0]
-        p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
-        # logger.info(f"w {trim_size} {p}")
-        image = image[:, p : p + reso[0]]
+        if crop_offsets is not None:
+            p_w = min(crop_offsets[0], trim_size)
+        else:
+            p_w = trim_size // 2 if not random_crop else random.randint(0, trim_size)
+        # logger.info(f"w {trim_size} {p_w}")
+        image = image[:, p_w : p_w + reso[0]]
     if image_height > reso[1]:
         trim_size = image_height - reso[1]
-        p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
-        # logger.info(f"h {trim_size} {p})
-        image = image[p : p + reso[1]]
+        if crop_offsets is not None:
+            p_h = min(crop_offsets[1], trim_size)
+        else:
+            p_h = trim_size // 2 if not random_crop else random.randint(0, trim_size)
+        # logger.info(f"h {trim_size} {p_h})
+        image = image[p_h : p_h + reso[1]]
 
     # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
     # I have no idea how to reflect the cropped value in crop left/top in the case of random crop
 
     crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
-
     assert image.shape[0] == reso[1] and image.shape[1] == reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
-    return image, original_size, crop_ltrb
+    return image, original_size, crop_ltrb, (p_w, p_h)
 
 
 # for new_cache_latents
 def load_images_and_masks_for_caching(
     image_infos: List[ImageInfo], use_alpha_mask: bool, random_crop: bool, random_crop_padding_percent: float = 0.05,
-) -> Tuple[torch.Tensor, List[np.ndarray], List[Tuple[int, int]], List[Tuple[int, int, int, int]]]:
+) -> Tuple[torch.Tensor, List[np.ndarray], List[Tuple[int, int]], List[Tuple[int, int, int, int]], List[Tuple[int, int]]]:
     r"""
     requires image_infos to have: [absolute_path or image], bucket_reso, resized_size
 
-    returns: image_tensor, alpha_masks, original_sizes, crop_ltrbs
+    returns: image_tensor, alpha_masks, original_sizes, crop_ltrbs, crop_offsets_list
 
     image_tensor: torch.Tensor = torch.Size([B, 3, H, W]), ...], normalized to [-1, 1]
     alpha_masks: List[np.ndarray] = [np.ndarray([H, W]), ...], normalized to [0, 1]
     original_sizes: List[Tuple[int, int]] = [(W, H), ...]
     crop_ltrbs: List[Tuple[int, int, int, int]] = [(L, T, R, B), ...]
+    crop_offsets_list: List[Tuple[int, int]] = [(p_w, p_h), ...]
     """
     images: List[torch.Tensor] = []
     alpha_masks: List[np.ndarray] = []
     original_sizes: List[Tuple[int, int]] = []
     crop_ltrbs: List[Tuple[int, int, int, int]] = []
+    crop_offsets_list: List[Tuple[int, int]] = []
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(
+        image, original_size, crop_ltrb, crop_offs = trim_and_resize_if_required(
             random_crop, image, info.bucket_reso, info.resized_size, resize_interpolation=info.resize_interpolation, random_crop_padding_percent=random_crop_padding_percent
         )
 
         original_sizes.append(original_size)
         crop_ltrbs.append(crop_ltrb)
+        crop_offsets_list.append(crop_offs)
 
         if use_alpha_mask:
             if image.shape[2] == 4:
@@ -3228,7 +3312,7 @@ def load_images_and_masks_for_caching(
         images.append(image)
 
     img_tensor = torch.stack(images, dim=0)
-    return img_tensor, alpha_masks, original_sizes, crop_ltrbs
+    return img_tensor, alpha_masks, original_sizes, crop_ltrbs, crop_offsets_list
 
 
 def cache_batch_latents(
@@ -3245,12 +3329,14 @@ def cache_batch_latents(
     """
     images = []
     alpha_masks: List[np.ndarray] = []
+    crop_offsets_map: Dict[str, Tuple[int, int]] = {}  # image_key -> crop offsets for ADDifT alignment
     for info in image_infos:
         image = load_image(info.absolute_path, use_alpha_mask) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
-        image, original_size, crop_ltrb = trim_and_resize_if_required(
+        image, original_size, crop_ltrb, crop_offs = trim_and_resize_if_required(
             random_crop, image, info.bucket_reso, info.resized_size, resize_interpolation=info.resize_interpolation, random_crop_padding_percent=random_crop_padding_percent
         )
+        crop_offsets_map[info.absolute_path] = crop_offs
 
         info.latents_original_size = original_size
         info.latents_crop_ltrb = crop_ltrb
@@ -3303,6 +3389,42 @@ def cache_batch_latents(
             if flip_aug:
                 info.latents_flipped = flipped_latent
             info.alpha_mask = alpha_mask
+
+    # ADDifT: cache target image latents for images that have addift_target_absolute_path
+    addift_infos = [info for info in image_infos if info.addift_target_absolute_path is not None]
+    if addift_infos:
+        target_images = []
+        for info in addift_infos:
+            target_img = load_image(info.addift_target_absolute_path, False)
+            source_offsets = crop_offsets_map.get(info.absolute_path)
+            target_img, _, _, _ = trim_and_resize_if_required(
+                random_crop, target_img, info.bucket_reso, info.resized_size,
+                resize_interpolation=info.resize_interpolation, random_crop_padding_percent=random_crop_padding_percent,
+                crop_offsets=source_offsets,
+            )
+            target_img = target_img[:, :, :3]
+            target_img = IMAGE_TRANSFORMS(target_img)
+            target_images.append(target_img)
+
+        target_tensors = torch.stack(target_images, dim=0)
+        target_tensors = target_tensors.to(device=vae.device, dtype=vae.dtype)
+
+        with torch.no_grad():
+            target_latents = vae.encode(target_tensors).latent_dist.sample().to("cpu")
+
+        if flip_aug:
+            target_tensors = torch.flip(target_tensors, dims=[3])
+            with torch.no_grad():
+                target_flipped_latents = vae.encode(target_tensors).latent_dist.sample().to("cpu")
+        else:
+            target_flipped_latents = [None] * len(target_latents)
+
+        for info, t_latent, t_flipped in zip(addift_infos, target_latents, target_flipped_latents):
+            if torch.isnan(t_latent).any():
+                raise RuntimeError(f"NaN detected in ADDifT target latents: {info.addift_target_absolute_path}")
+            info.addift_target_latents = t_latent
+            if flip_aug and t_flipped is not None:
+                info.addift_target_latents_flipped = t_flipped
 
     if not HIGH_VRAM:
         clean_memory_on_device(vae.device)

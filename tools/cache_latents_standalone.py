@@ -160,7 +160,7 @@ def cache_batch_latents_fast(
     processed_images, original_sizes, crop_ltrbs, alpha_masks = [], [], [], []
 
     for img_np, resized_size in zip(images, resized_sizes):
-        image_np, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, img_np, batch_bucket_reso, resized_size)
+        image_np, original_size, crop_ltrb, _ = trim_and_resize_if_required(random_crop, img_np, batch_bucket_reso, resized_size)
         original_sizes.append(original_size)
         crop_ltrbs.append(crop_ltrb)
 

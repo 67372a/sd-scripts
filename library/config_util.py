@@ -82,6 +82,7 @@ class BaseSubsetParams:
     validation_seed: int = 0
     validation_split: float = 0.0
     resize_interpolation: Optional[str] = None
+    addift_target_image_dir: Optional[str] = None
 
 
 @dataclass
