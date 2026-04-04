@@ -175,6 +175,34 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding, encoder_attention_mask=text_masks)
         return noise_pred
 
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """SDXL has two CLIP encoders: CLIP-L (text_encoder1) and CLIP-G (text_encoder2)."""
+        return [
+            (tokenizers[0], text_encoders[0], "clip_l"),
+            (tokenizers[1], text_encoders[1], "clip_g"),
+        ]
+
+    def save_pivotal_tuning_embeddings(self, file, token_ids_dict, text_encoders, save_dtype, metadata):
+        """Save SDXL Pivotal Tuning embeddings with clip_l and clip_g keys."""
+        import os
+        state_dict = {}
+        enc_map = {"clip_l": text_encoders[0], "clip_g": text_encoders[1]}
+        for enc_name, token_ids in token_ids_dict.items():
+            te = enc_map.get(enc_name)
+            if te is None:
+                continue
+            embeds = te.get_input_embeddings().weight.data
+            learned = torch.stack([embeds[tid].detach().clone().cpu() for tid in token_ids])
+            if save_dtype is not None:
+                learned = learned.to(save_dtype)
+            state_dict[enc_name] = learned
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import save_file
+            save_file(state_dict, file, metadata if metadata else {})
+        else:
+            torch.save(state_dict, file)
+
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
         sdxl_train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
 

@@ -289,6 +289,37 @@ class Sd3NetworkTrainer(train_network.NetworkTrainer):
             text_encoders[1].to(accelerator.device, dtype=weight_dtype)
             text_encoders[2].to(accelerator.device)
 
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """SD3 uses CLIP-L, CLIP-G, and T5XXL; Pivotal Tuning applies only to CLIP encoders."""
+        # tokenizers[0]/text_encoders[0] -> CLIP-L, tokenizers[1]/text_encoders[1] -> CLIP-G
+        return [
+            (tokenizers[0], text_encoders[0], "clip_l"),
+            (tokenizers[1], text_encoders[1], "clip_g"),
+        ]
+
+    def save_pivotal_tuning_embeddings(self, file, token_ids_dict, text_encoders, save_dtype, metadata):
+        """Save SD3 Pivotal Tuning embeddings with clip_l and clip_g keys."""
+        import os
+
+        state_dict = {}
+        enc_map = {"clip_l": text_encoders[0], "clip_g": text_encoders[1]}
+        for enc_name, te in enc_map.items():
+            token_ids = token_ids_dict.get(enc_name)
+            if token_ids is None:
+                continue
+            embeds = te.get_input_embeddings().weight.data
+            learned = torch.stack([embeds[tid].detach().clone().cpu() for tid in token_ids])
+            if save_dtype is not None:
+                learned = learned.to(save_dtype)
+            state_dict[enc_name] = learned
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import save_file
+
+            save_file(state_dict, file, metadata if metadata else {})
+        else:
+            torch.save(state_dict, file)
+
     # def call_unet(self, args, accelerator, unet, noisy_latents, timesteps, text_conds, batch, weight_dtype):
     #     noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype
 

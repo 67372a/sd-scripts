@@ -424,6 +424,57 @@ class NetworkTrainer:
     def on_step_start(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train: bool = True):
         pass
 
+    # region Pivotal Tuning hooks (override in subclasses)
+
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """
+        Return list of (tokenizer, text_encoder, encoder_name) tuples for CLIP encoders only.
+        Non-CLIP encoders (T5XXL, Gemma2, Qwen3, etc.) should be excluded.
+        Override in subclasses. Base SD1.5/2.0 returns the single CLIP encoder.
+        """
+        if len(tokenizers) == 1 and len(text_encoders) == 1:
+            return [(tokenizers[0], text_encoders[0], "clip_l")]
+        return []
+
+    def save_pivotal_tuning_embeddings(self, file, token_ids_dict, text_encoders, save_dtype, metadata):
+        """
+        Save learned Pivotal Tuning embeddings to a file.
+        token_ids_dict: dict mapping encoder_name -> list of token_ids
+        Override in subclasses for model-specific format.
+        """
+        import os
+        state_dict = {}
+        for enc_name, token_ids in token_ids_dict.items():
+            # find the matching text encoder
+            for te in text_encoders:
+                embeds = te.get_input_embeddings().weight.data
+                if embeds.shape[0] > max(token_ids):
+                    learned = torch.stack([embeds[tid].detach().clone().cpu() for tid in token_ids])
+                    if save_dtype is not None:
+                        learned = learned.to(save_dtype)
+                    state_dict[enc_name] = learned
+                    break
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import save_file
+            save_file(state_dict, file, metadata if metadata else {})
+        else:
+            torch.save(state_dict, file)
+
+    def load_pivotal_tuning_embeddings(self, file):
+        """
+        Load Pivotal Tuning embeddings from a file.
+        Returns dict mapping encoder_name -> tensor of embeddings.
+        """
+        import os
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import load_file
+            return load_file(file)
+        else:
+            return torch.load(file, map_location="cpu")
+
+    # endregion
+
     def on_validation_step_end(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype):
         pass
 
@@ -906,6 +957,13 @@ class NetworkTrainer:
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
 
+        # Early Pivotal Tuning compatibility: disable cache_text_encoder_outputs before assert_extra_args
+        if getattr(args, "train_text_encoder_ti", False) and getattr(args, "cache_text_encoder_outputs", False):
+            logger.warning(
+                "cache_text_encoder_outputs is not compatible with Pivotal Tuning (--train_text_encoder_ti), disabling it"
+            )
+            args.cache_text_encoder_outputs = False
+
         if getattr(args, "flow_model", False):
             logger.info("Using Rectified Flow training objective.")
             if args.v_parameterization:
@@ -1104,6 +1162,80 @@ class NetworkTrainer:
         # text_encoder is List[CLIPTextModel] or CLIPTextModel
         text_encoders = text_encoder if isinstance(text_encoder, list) else [text_encoder]
 
+        # region Pivotal Tuning setup: insert new tokens into CLIP tokenizers and resize embeddings
+        pivotal_tuning_enabled = getattr(args, "train_text_encoder_ti", False)
+        pivotal_token_ids_dict = {}  # enc_name -> list of token_ids
+        pivotal_orig_embeds = {}  # enc_name -> original embedding weights (for gradient masking)
+        pivotal_index_no_updates = {}  # enc_name -> boolean mask of tokens NOT to update
+        pivotal_token_strings = []  # list of token strings added
+
+        if pivotal_tuning_enabled:
+            assert args.token_abstraction is not None, (
+                "--token_abstraction must be specified when using --train_text_encoder_ti"
+            )
+            assert not args.network_train_unet_only, (
+                "--network_train_unet_only cannot be used with --train_text_encoder_ti"
+            )
+            if args.cache_text_encoder_outputs:
+                logger.warning(
+                    "cache_text_encoder_outputs is not compatible with Pivotal Tuning, disabling it"
+                    " / cache_text_encoder_outputsはPivotal Tuningと互換性がないため、無効化します"
+                )
+                args.cache_text_encoder_outputs = False
+
+            clip_pairs = self.get_clip_tokenizers_and_text_encoders(tokenizers, text_encoders)
+            if len(clip_pairs) == 0:
+                logger.error("No CLIP encoders found for this model type. Pivotal Tuning requires CLIP encoders.")
+                pivotal_tuning_enabled = False
+            else:
+                num_new_tokens = args.num_new_tokens_per_abstraction
+                token_abstraction = args.token_abstraction
+
+                # generate token strings: TOK -> <TOK>, <TOK1>, <TOK2>, ...
+                pivotal_token_strings = [f"<{token_abstraction}>"] + [
+                    f"<{token_abstraction}{i+1}>" for i in range(num_new_tokens - 1)
+                ]
+                accelerator.print(f"Pivotal Tuning: adding tokens {pivotal_token_strings}")
+
+                for tok, te, enc_name in clip_pairs:
+                    # add new tokens to tokenizer
+                    num_added = tok.add_tokens(pivotal_token_strings)
+                    assert num_added == num_new_tokens, (
+                        f"tokenizer {enc_name} already has one of the token strings. "
+                        f"Please use a different --token_abstraction. Added {num_added}, expected {num_new_tokens}"
+                    )
+
+                    token_ids = tok.convert_tokens_to_ids(pivotal_token_strings)
+                    accelerator.print(f"  {enc_name}: token_ids = {token_ids}")
+
+                    # resize token embeddings
+                    te.resize_token_embeddings(len(tok))
+
+                    # initialize new token embeddings
+                    token_embeds = te.get_input_embeddings().weight.data
+                    if args.init_word is not None:
+                        init_token_ids = tok.encode(args.init_word, add_special_tokens=False)
+                        if len(init_token_ids) == 0:
+                            logger.warning(f"init_word '{args.init_word}' produced no tokens for {enc_name}, using random init")
+                        else:
+                            accelerator.print(f"  {enc_name}: initializing from '{args.init_word}' (token_ids={init_token_ids})")
+                            for i, tid in enumerate(token_ids):
+                                token_embeds[tid] = token_embeds[init_token_ids[i % len(init_token_ids)]].clone()
+
+                    # store original embeddings for gradient masking
+                    pivotal_orig_embeds[enc_name] = token_embeds.detach().clone()
+
+                    # create mask: True for tokens that should NOT be updated (all except our new tokens)
+                    index_no_updates = torch.ones(len(tok), dtype=torch.bool)
+                    for tid in token_ids:
+                        index_no_updates[tid] = False
+                    pivotal_index_no_updates[enc_name] = index_no_updates
+
+                    pivotal_token_ids_dict[enc_name] = token_ids
+
+                accelerator.print(f"Pivotal Tuning: setup complete for {list(pivotal_token_ids_dict.keys())}")
+        # endregion
+
         # prepare dataset for latents caching if needed
         if cache_latents:
             vae.to(accelerator.device, dtype=vae_dtype)
@@ -1250,6 +1382,45 @@ class NetworkTrainer:
             text_encoder_lr
          ) = train_util.prepare_optimizer(args, network, accelerator)
 
+        # region Pivotal Tuning optimizer: create separate optimizer for embedding params
+        pivotal_optimizer = None
+        pivotal_lr_scheduler = None
+        pivotal_ti_phase_steps = 0
+        pivotal_embedding_params = []
+
+        if pivotal_tuning_enabled:
+            clip_pairs = self.get_clip_tokenizers_and_text_encoders(tokenizers, text_encoders)
+            for tok, te, enc_name in clip_pairs:
+                # only the token embeddings layer is trainable
+                embedding_layer = te.get_input_embeddings()
+                embedding_layer.requires_grad_(True)
+                pivotal_embedding_params.append(embedding_layer.weight)
+
+            # determine learning rate for embeddings
+            ti_lr = args.pivotal_tuning_lr
+            if ti_lr is None:
+                if text_encoder_lr is not None:
+                    ti_lr = text_encoder_lr if isinstance(text_encoder_lr, (float, int)) else text_encoder_lr[0]
+                else:
+                    ti_lr = args.learning_rate
+            accelerator.print(f"Pivotal Tuning embedding LR: {ti_lr}")
+
+            # create optimizer for embedding params (EDM2-style dynamic import)
+            values = args.pivotal_tuning_optimizer.split(".")
+            optimizer_module = importlib.import_module(".".join(values[:-1]))
+            case_sensitive_optimizer_type = values[-1]
+            opti_args = ast.literal_eval(args.pivotal_tuning_optimizer_args)
+            if isinstance(opti_args, dict) and "lr" in opti_args:
+                # avoid double-specifying lr
+                opti_args = dict(opti_args)
+                opti_args.pop("lr", None)
+
+            pivotal_optimizer = getattr(optimizer_module, case_sensitive_optimizer_type)(
+                pivotal_embedding_params, lr=float(ti_lr), **(opti_args if isinstance(opti_args, dict) else {})
+            )
+            pivotal_lr_scheduler = train_util.get_dummy_scheduler(pivotal_optimizer)
+        # endregion
+
         # prepare dataloader
         # strategies are set here because they cannot be referenced in another process. Copy them with the dataset
         # some strategies can be None
@@ -1302,6 +1473,14 @@ class NetworkTrainer:
         # lr schedulerを用意する
         lr_scheduler = train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
 
+        # calculate Pivotal Tuning phase boundary
+        if pivotal_tuning_enabled:
+            pivotal_ti_phase_steps = int(args.max_train_steps * args.train_text_encoder_ti_frac)
+            accelerator.print(
+                f"Pivotal Tuning: Phase 1 (TI-only) for {pivotal_ti_phase_steps} steps, "
+                f"Phase 2 (LoRA{'+TI' if args.pivotal_tuning_continue_ti else ''}) for {args.max_train_steps - pivotal_ti_phase_steps} steps"
+            )
+
         # 実験的機能：勾配も含めたfp16/bf16学習を行う　モデル全体をfp16/bf16にする
         if args.full_fp16:
             assert (
@@ -1352,6 +1531,15 @@ class NetworkTrainer:
                 if te_weight_dtype != weight_dtype:
                     self.prepare_text_encoder_fp8(i, t_enc, te_weight_dtype, weight_dtype)
 
+        # Pivotal Tuning: re-enable requires_grad for embedding layers after the global freeze
+        if pivotal_tuning_enabled:
+            clip_pairs = self.get_clip_tokenizers_and_text_encoders(tokenizers, text_encoders)
+            for tok, te, enc_name in clip_pairs:
+                te.get_input_embeddings().requires_grad_(True)
+                # keep embeddings in full precision even if rest of TE is fp8
+                if te_weight_dtype != weight_dtype:
+                    te.get_input_embeddings().to(dtype=weight_dtype)
+
         # acceleratorがなんかよろしくやってくれるらしい / accelerator will do something good
         if args.deepspeed:
             flags = self.get_text_encoders_train_flags(args, text_encoders)
@@ -1383,7 +1571,12 @@ class NetworkTrainer:
                 else:
                     text_encoder = text_encoders[0]
             else:
-                pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
+                # if text_encoder is not trained, no need to prepare. and device and dtype are already set
+                # BUT: Pivotal Tuning needs text encoders on GPU for embedding gradient computation
+                if pivotal_tuning_enabled:
+                    for t_enc in text_encoders:
+                        if t_enc.device.type == "cpu":
+                            t_enc.to(accelerator.device)
 
             network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
                 network, optimizer, train_dataloader, lr_scheduler
@@ -1734,6 +1927,16 @@ class NetworkTrainer:
         metadata["ss_vae_shift_factor"] = self.latent_shift
         metadata["ss_vae_reflection_padding"] = getattr(args, "vae_reflection_padding", False)
 
+        if pivotal_tuning_enabled:
+            metadata["ss_pivotal_tuning"] = True
+            metadata["ss_pivotal_tuning_token_abstraction"] = args.token_abstraction
+            metadata["ss_pivotal_tuning_num_new_tokens"] = args.num_new_tokens_per_abstraction
+            metadata["ss_pivotal_tuning_token_strings"] = ",".join(pivotal_token_strings)
+            metadata["ss_pivotal_tuning_ti_frac"] = args.train_text_encoder_ti_frac
+            metadata["ss_pivotal_tuning_continue_ti"] = getattr(args, "pivotal_tuning_continue_ti", False)
+            if args.init_word is not None:
+                metadata["ss_pivotal_tuning_init_word"] = args.init_word
+
         metadata = {k: str(v) for k, v in metadata.items()}
 
         # make minimum metadata for filtering
@@ -1839,9 +2042,39 @@ class NetworkTrainer:
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
+        def save_pivotal_embeddings(ckpt_name):
+            """Save Pivotal Tuning embeddings alongside a LoRA checkpoint."""
+            if not pivotal_tuning_enabled or len(pivotal_token_ids_dict) == 0:
+                return
+            # derive embedding filename from LoRA checkpoint name
+            base, ext = os.path.splitext(ckpt_name)
+            emb_name = base + "_pivotal_ti" + ext
+            emb_file = os.path.join(args.output_dir, emb_name)
+            accelerator.print(f"  saving Pivotal Tuning embeddings: {emb_file}")
+            emb_metadata = {
+                "token_strings": ",".join(pivotal_token_strings),
+                "token_abstraction": args.token_abstraction,
+                "num_new_tokens": str(args.num_new_tokens_per_abstraction),
+            }
+            self.save_pivotal_tuning_embeddings(
+                emb_file, pivotal_token_ids_dict, text_encoders, save_dtype, emb_metadata
+            )
+
+        def remove_pivotal_embeddings(old_ckpt_name):
+            """Remove old Pivotal Tuning embeddings file."""
+            if not pivotal_tuning_enabled:
+                return
+            base, ext = os.path.splitext(old_ckpt_name)
+            old_emb_name = base + "_pivotal_ti" + ext
+            old_emb_file = os.path.join(args.output_dir, old_emb_name)
+            if os.path.exists(old_emb_file):
+                accelerator.print(f"  removing old Pivotal Tuning embeddings: {old_emb_file}")
+                os.remove(old_emb_file)
+
         # if text_encoder is not needed for training, delete it to save memory.
         # TODO this can be automated after SDXL sample prompt cache is implemented
-        if self.is_text_encoder_not_needed_for_training(args):
+        # Pivotal Tuning needs text encoders for embedding training, so skip deletion
+        if self.is_text_encoder_not_needed_for_training(args) and not pivotal_tuning_enabled:
             logger.info("text_encoder is not needed for training. deleting to save memory.")
             for t_enc in text_encoders:
                 del t_enc
@@ -1964,6 +2197,35 @@ class NetworkTrainer:
                     # preprocess batch for each model
                     self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
 
+                    # Pivotal Tuning phase management
+                    pivotal_in_ti_phase = False
+                    pivotal_train_embeddings = False
+                    if pivotal_tuning_enabled:
+                        pivotal_in_ti_phase = global_step < pivotal_ti_phase_steps
+                        pivotal_train_embeddings = pivotal_in_ti_phase or getattr(args, "pivotal_tuning_continue_ti", False)
+
+                        if pivotal_in_ti_phase:
+                            # Phase 1: TI-only, disable LoRA contribution
+                            if network_has_multiplier:
+                                accelerator.unwrap_model(network).set_multiplier(0.0)
+                        else:
+                            # Phase 2: LoRA active
+                            if network_has_multiplier:
+                                accelerator.unwrap_model(network).set_multiplier(1.0)
+
+                        # log phase transition and toggle embedding requires_grad
+                        if global_step == pivotal_ti_phase_steps and pivotal_ti_phase_steps > 0:
+                            accelerator.print(f"\n*** Pivotal Tuning: transitioning from Phase 1 (TI) to Phase 2 (LoRA) at step {global_step} ***\n")
+                            if not getattr(args, "pivotal_tuning_continue_ti", False):
+                                # disable embedding gradients in Phase 2 to save compute
+                                clip_pairs = self.get_clip_tokenizers_and_text_encoders(tokenizers, text_encoders)
+                                for tok, te, enc_name in clip_pairs:
+                                    te.get_input_embeddings().requires_grad_(False)
+
+                    # When Pivotal Tuning is active and we're training embeddings, we need
+                    # text encoder gradients enabled so loss flows back to the embedding layer
+                    effective_train_text_encoder = train_text_encoder or pivotal_train_embeddings
+
                     loss, pre_scaling_loss, loss_scaled = self.process_batch(
                         batch,
                         text_encoders,
@@ -1978,7 +2240,7 @@ class NetworkTrainer:
                         text_encoding_strategy,
                         tokenize_strategy,
                         is_train=True,
-                        train_text_encoder=train_text_encoder,
+                        train_text_encoder=effective_train_text_encoder,
                         train_unet=train_unet,
                         edm2_model=edm2_model,
                     )
@@ -2022,9 +2284,38 @@ class NetworkTrainer:
                         #if hasattr(network, "update_norms"):
                         #    network.update_norms()
 
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    # Pivotal Tuning: phase-aware optimizer stepping
+                    if pivotal_tuning_enabled and pivotal_in_ti_phase:
+                        # Phase 1: only step the pivotal (embedding) optimizer, skip LoRA optimizer
+                        pivotal_optimizer.step()
+                        pivotal_lr_scheduler.step()
+                        pivotal_optimizer.zero_grad(set_to_none=True)
+                        # still step LoRA lr_scheduler to keep it in sync for Phase 2
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+                    else:
+                        # Phase 2 or no pivotal tuning: step LoRA optimizer normally
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+
+                        # optionally also step pivotal optimizer in Phase 2
+                        if pivotal_tuning_enabled:
+                            if pivotal_train_embeddings:
+                                pivotal_optimizer.step()
+                                pivotal_lr_scheduler.step()
+                            pivotal_optimizer.zero_grad(set_to_none=True)
+
+                    # Pivotal Tuning: gradient masking - restore original embeddings for non-new tokens
+                    if pivotal_tuning_enabled and pivotal_train_embeddings:
+                        clip_pairs = self.get_clip_tokenizers_and_text_encoders(tokenizers, text_encoders)
+                        for tok, te, enc_name in clip_pairs:
+                            if enc_name in pivotal_index_no_updates:
+                                with torch.no_grad():
+                                    current_embeds = te.get_input_embeddings().weight
+                                    mask = pivotal_index_no_updates[enc_name].to(current_embeds.device)
+                                    orig = pivotal_orig_embeds[enc_name].to(current_embeds.device)
+                                    current_embeds[mask] = orig[mask]
 
                     if args.edm2_loss_weighting:
                         edm2_optimizer.step()
@@ -2107,6 +2398,7 @@ class NetworkTrainer:
                                 if accelerator.is_main_process:
                                     ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
                                     save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                                    save_pivotal_embeddings(ckpt_name)
 
                                     if args.edm2_loss_weighting:
                                         loss_weights_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step, "_edm2_loss_weights")
@@ -2119,6 +2411,7 @@ class NetworkTrainer:
                                     if remove_step_no is not None:
                                         remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                         remove_model(remove_ckpt_name)
+                                        remove_pivotal_embeddings(remove_ckpt_name)
 
                                         if args.edm2_loss_weighting:
                                             remove_loss_weights_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no, "_edm2_loss_weights")
@@ -2188,6 +2481,11 @@ class NetworkTrainer:
                             current_val_loss=current_val_loss, 
                             average_val_loss=average_val_loss
                         )
+                        if pivotal_tuning_enabled:
+                            logs["pivotal/phase"] = 1 if pivotal_in_ti_phase else 2
+                            logs["pivotal/train_embeddings"] = 1 if pivotal_train_embeddings else 0
+                            if pivotal_lr_scheduler is not None:
+                                logs["lr/pivotal_ti"] = pivotal_lr_scheduler.get_last_lr()[0]
                         accelerator.log(logs, step=global_step)
                     current_global_step_loss = 0.0
                     if args.edm2_loss_weighting:
@@ -2221,6 +2519,7 @@ class NetworkTrainer:
                         if is_main_process and saving:
                             ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, current_epoch.value)
                             save_model(ckpt_name, accelerator.unwrap_model(network), global_step, current_epoch.value)
+                            save_pivotal_embeddings(ckpt_name)
 
                             if args.edm2_loss_weighting:
                                 loss_weights_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, current_epoch.value, "_edm2_loss_weights")
@@ -2230,6 +2529,7 @@ class NetworkTrainer:
                             if remove_epoch_no is not None:
                                 remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
                                 remove_model(remove_ckpt_name)
+                                remove_pivotal_embeddings(remove_ckpt_name)
 
                                 if args.edm2_loss_weighting:
                                     remove_loss_weights_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no, "_edm2_loss_weights")
@@ -2264,6 +2564,7 @@ class NetworkTrainer:
         if is_main_process:
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
             save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+            save_pivotal_embeddings(ckpt_name)
 
             if args.edm2_loss_weighting:
                 loss_weights_ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as, "_edm2_loss_weights")
@@ -2732,6 +3033,70 @@ def setup_parser() -> argparse.ArgumentParser:
     # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
     # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
     # parser.add_argument("--loraplus_text_encoder_lr_ratio", default=None, type=float, help="LoRA+ text encoder learning rate ratio")
+
+    # Pivotal Tuning (Textual Inversion + LoRA) arguments
+    parser.add_argument(
+        "--train_text_encoder_ti",
+        action="store_true",
+        help="Enable Pivotal Tuning: train new token embeddings in CLIP text encoders alongside LoRA"
+        " / Pivotal Tuningを有効化: LoRAと並行してCLIPテキストエンコーダの新しいトークン埋め込みを学習する",
+    )
+    parser.add_argument(
+        "--train_text_encoder_ti_frac",
+        type=float,
+        default=0.5,
+        help="Fraction of total training steps for TI-only phase before LoRA training begins (default 0.5)"
+        " / LoRA学習開始前のTI専用フェーズの全学習ステップに対する割合（デフォルト0.5）",
+    )
+    parser.add_argument(
+        "--token_abstraction",
+        type=str,
+        default=None,
+        help="Token placeholder string for Pivotal Tuning, e.g. 'TOK' (will become <TOK>, <TOK1>, ...)"
+        " / Pivotal Tuningのトークンプレースホルダ文字列（例: 'TOK'）",
+    )
+    parser.add_argument(
+        "--num_new_tokens_per_abstraction",
+        type=int,
+        default=2,
+        help="Number of new tokens per abstraction for Pivotal Tuning (default 2)"
+        " / Pivotal Tuningの概念あたりの新しいトークン数（デフォルト2）",
+    )
+    parser.add_argument(
+        "--init_word",
+        type=str,
+        default=None,
+        help="Word to initialize new token embeddings from for Pivotal Tuning"
+        " / Pivotal Tuningで新しいトークン埋め込みの初期化に使う単語",
+    )
+    parser.add_argument(
+        "--pivotal_tuning_lr",
+        type=float,
+        default=None,
+        help="Learning rate for Pivotal Tuning token embeddings (defaults to text_encoder_lr or learning_rate)"
+        " / Pivotal Tuningトークン埋め込みの学習率（デフォルトはtext_encoder_lrまたはlearning_rate）",
+    )
+    parser.add_argument(
+        "--pivotal_tuning_optimizer",
+        type=str,
+        default="torch.optim.AdamW",
+        help="Fully qualified optimizer class name to use for Pivotal Tuning token embeddings."
+        " / Pivotal Tuningトークン埋め込みに使用するoptimizerの完全修飾クラス名",
+    )
+    parser.add_argument(
+        "--pivotal_tuning_optimizer_args",
+        type=str,
+        default=r"{'weight_decay': 1e-4, 'betas': (0.9,0.999)}",
+        help="A dict literal as a string of optimizer args for the Pivotal Tuning optimizer."
+        " / Pivotal Tuning optimizerの引数（dict文字列）",
+    )
+    parser.add_argument(
+        "--pivotal_tuning_continue_ti",
+        action="store_true",
+        help="Continue training token embeddings during Phase 2 (LoRA phase) of Pivotal Tuning"
+        " / Pivotal TuningのPhase 2（LoRAフェーズ）でもトークン埋め込みの学習を継続する",
+    )
+
     return parser
 
 

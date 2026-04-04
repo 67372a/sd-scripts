@@ -511,6 +511,10 @@ class HunyuanImageNetworkTrainer(train_network.NetworkTrainer):
             text_encoders[0].to(vlm_device)
             text_encoders[1].to(vlm_device)
 
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """HunyuanImage uses Qwen2.5-VL and ByT5; Pivotal Tuning applies only to CLIP encoders."""
+        return []
+
     def sample_images(self, accelerator, args, epoch, global_step, device, ae, tokenizer, text_encoder, flux):
         text_encoders = text_encoder  # for compatibility
         text_encoders = self.get_models_for_text_encoding(args, accelerator, text_encoders)

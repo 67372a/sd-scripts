@@ -302,6 +302,33 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             text_encoders[0].to(accelerator.device, dtype=weight_dtype)
             text_encoders[1].to(accelerator.device)
 
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """Flux uses CLIP-L and T5XXL; Pivotal Tuning applies only to CLIP encoders."""
+        if not getattr(self, "use_clip_l", True):
+            return []
+        # tokenizers[0] / text_encoders[0] is CLIP-L
+        return [(tokenizers[0], text_encoders[0], "clip_l")]
+
+    def save_pivotal_tuning_embeddings(self, file, token_ids_dict, text_encoders, save_dtype, metadata):
+        """Save Flux Pivotal Tuning embeddings with clip_l key."""
+        import os
+
+        state_dict = {}
+        token_ids = token_ids_dict.get("clip_l")
+        if token_ids is not None:
+            embeds = text_encoders[0].get_input_embeddings().weight.data
+            learned = torch.stack([embeds[tid].detach().clone().cpu() for tid in token_ids])
+            if save_dtype is not None:
+                learned = learned.to(save_dtype)
+            state_dict["clip_l"] = learned
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import save_file
+
+            save_file(state_dict, file, metadata if metadata else {})
+        else:
+            torch.save(state_dict, file)
+
     def sample_images(self, accelerator, args, epoch, global_step, device, ae, tokenizer, text_encoder, flux):
         text_encoders = text_encoder  # for compatibility
         text_encoders = self.get_models_for_text_encoding(args, accelerator, text_encoders)

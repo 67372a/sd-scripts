@@ -227,6 +227,10 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             # move text encoder to device for encoding during training/validation
             text_encoders[0].to(accelerator.device)
 
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """Anima uses Qwen3 as text encoder; Pivotal Tuning applies only to CLIP encoders."""
+        return []
+
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
         text_encoders = text_encoder if isinstance(text_encoder, list) else [text_encoder]  # compatibility
         te = self.get_models_for_text_encoding(args, accelerator, text_encoders)

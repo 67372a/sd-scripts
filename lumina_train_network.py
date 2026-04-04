@@ -205,6 +205,10 @@ class LuminaNetworkTrainer(train_network.NetworkTrainer):
             # Text Encoderから毎回出力を取得するので、GPUに乗せておく
             text_encoders[0].to(accelerator.device, dtype=weight_dtype)
 
+    def get_clip_tokenizers_and_text_encoders(self, tokenizers, text_encoders):
+        """Lumina uses Gemma2 as text encoder; Pivotal Tuning applies only to CLIP encoders."""
+        return []
+
     def sample_images(
         self,
         accelerator,
