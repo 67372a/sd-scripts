@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 try:
     from ramtorch.modules.linear import CPUBouncingLinear
 except ImportError:
-    logger.error("Failed to import ramtorch, please check ramtorch is installed correctly into the venv.")
+    logger.debug("ramtorch not available; CPU-bouncing linear disabled.")
     CPUBouncingLinear = type(None)
 
 def make_unet_conversion_map() -> Dict[str, str]:
@@ -183,7 +183,7 @@ class LoRAModule(torch.nn.Module):
             # Move LoRA parameters to GPU
             self.lora_up.to(torch.cuda.current_device())
             self.lora_down.to(torch.cuda.current_device())
-            self.org_module.cpu()
+            self.org_module[0].cpu()
 
     # restore org_module's forward method
     def unapply_to(self):
