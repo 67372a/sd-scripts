@@ -14,10 +14,11 @@ from library.config_util import (
 from library.train_util import BaseDataset, DreamBoothDataset, DreamBoothSubset, ImageInfo
 
 
-def _subset(resolution=None, batch_size=None):
+def _subset(resolution=None, batch_size=None, flip_aug=False):
     return SimpleNamespace(
         resolution=resolution,
         batch_size=batch_size,
+        flip_aug=flip_aug,
     )
 
 
@@ -140,10 +141,107 @@ def test_batch_size_falls_back_to_dataset_level_for_undefined_subsets():
 
     dataset.make_buckets()
 
-    # both subsets use the dataset batch size: ceil(4/3) * 2 = 4 batches
-    assert len(dataset) == 4
+    # both subsets inherit the dataset batch size, so their configurations match and
+    # they share a pool: ceil(8/3) = 3 batches (instead of 2 + 2 with separate pools)
+    assert len(dataset) == 3
     for batch in _batch_slices(dataset):
         assert len(batch) <= 3
+
+
+def test_same_config_subsets_share_batch_pool():
+    dataset = _dataset((512, 512), batch_size=4)
+    subset_a = _subset(None, None)
+    subset_b = _subset(None, None)
+    for i in range(5):
+        _add_image(dataset, f"a{i}", subset_a, (512, 512))
+    for i in range(5):
+        _add_image(dataset, f"b{i}", subset_b, (512, 512))
+    dataset.subsets = [subset_a, subset_b]
+
+    dataset.make_buckets()
+
+    # matching configurations merge into one pool: ceil(10/4) = 3 batches
+    # (subset-scoped pools would need 2 + 2 = 4 batches)
+    assert len(dataset) == 3
+
+    keys_a = {f"a{i}" for i in range(5)}
+    keys_b = {f"b{i}" for i in range(5)}
+    batches = _batch_slices(dataset)
+    for batch in batches:
+        assert len(batch) <= 4
+
+    # all images are consumed exactly once
+    all_keys = [k for batch in batches for k in batch]
+    assert len(all_keys) == 10
+    assert set(all_keys) == keys_a | keys_b
+
+    # the representative subset of the shared pool reports the effective batch size
+    assert len(dataset.batch_buckets) == 1
+    assert dataset.get_subset_batch_size(dataset.batch_bucket_subsets[0]) == 4
+
+
+def test_explicitly_equal_batch_sizes_share_batch_pool():
+    dataset = _dataset((512, 512), batch_size=1)
+    subset_a = _subset(None, 2)
+    subset_b = _subset(None, 2)
+    for i in range(3):
+        _add_image(dataset, f"a{i}", subset_a, (512, 512))
+        _add_image(dataset, f"b{i}", subset_b, (512, 512))
+    dataset.subsets = [subset_a, subset_b]
+
+    dataset.make_buckets()
+
+    # equal effective batch sizes merge: 6 items / 2 = 3 batches
+    assert len(dataset) == 3
+    assert len(dataset.batch_buckets) == 1
+    for batch in _batch_slices(dataset):
+        assert len(batch) <= 2
+
+
+def test_differing_flip_aug_keeps_pools_separate():
+    dataset = _dataset((512, 512), batch_size=2)
+    subset_a = _subset(None, 2, flip_aug=False)
+    subset_b = _subset(None, 2, flip_aug=True)
+    for i in range(4):
+        _add_image(dataset, f"a{i}", subset_a, (512, 512))
+        _add_image(dataset, f"b{i}", subset_b, (512, 512))
+    dataset.subsets = [subset_a, subset_b]
+
+    dataset.make_buckets()
+
+    # flip_aug differs, so the aug-flag assert in __getitem__ would fail on mixed
+    # batches: the subsets must keep separate pools despite equal batch sizes
+    assert len(dataset.batch_buckets) == 2
+    assert len(dataset) == 4
+
+    keys_a = {f"a{i}" for i in range(4)}
+    keys_b = {f"b{i}" for i in range(4)}
+    for batch in _batch_slices(dataset):
+        keys = set(batch)
+        assert keys <= keys_a or keys <= keys_b, "batch mixes images with differing flip_aug"
+
+
+def test_differing_resolution_keeps_pools_separate():
+    dataset = _dataset((512, 512), batch_size=2)
+    subset_a = _subset((512, 512), 2)
+    subset_b = _subset((768, 768), 2)
+    for i in range(4):
+        _add_image(dataset, f"a{i}", subset_a, (512, 512))
+        _add_image(dataset, f"b{i}", subset_b, (768, 768))
+    dataset.subsets = [subset_a, subset_b]
+
+    dataset.make_buckets()
+
+    # resolutions differ, so the subsets keep separate pools despite equal batch sizes
+    assert len(dataset.batch_buckets) == 2
+    assert len(dataset) == 4
+
+    keys_a = {f"a{i}" for i in range(4)}
+    keys_b = {f"b{i}" for i in range(4)}
+    for batch in _batch_slices(dataset):
+        keys = set(batch)
+        assert keys <= keys_a or keys <= keys_b, "batch mixes images with differing resolutions"
+        assert dataset.image_data[next(iter(keys))].bucket_reso in {(512, 512), (768, 768)}
 
 
 def test_num_repeats_are_preserved_in_subset_scoped_buckets():

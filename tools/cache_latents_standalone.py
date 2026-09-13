@@ -524,7 +524,7 @@ def cache_latents(args: argparse.Namespace) -> None:
                 new_buckets.append(filtered)
         dataset.bucket_manager.buckets = new_buckets
 
-        # keep the subset-scoped batching buckets and batch indices consistent with the filtered image set
+        # keep the batch pools (subset- or shared-group-scoped) and batch indices consistent with the filtered image set
         new_batch_buckets = []
         new_batch_bucket_subsets = []
         for bucket, subset in zip(dataset.batch_buckets, dataset.batch_bucket_subsets):

@@ -152,14 +152,14 @@ There are two primary ways to enable validation:
 
 ### Per-Subset Batch Size and Determinism
 
-A `batch_size` set on a subset applies to validation datasets as well: validation batches are formed per subset with the subset's effective batch size, and a batch never mixes images from different subsets. Batch formation is pure index arithmetic and consumes no RNG state, so validation determinism is unaffected — the validation loop already reads the actual batch size of each batch when averaging the loss, and the per-batch RNG save/restore around the validation dataloader keeps item-level draws (e.g. flip augmentation) deterministic across validation runs.
+A `batch_size` set on a subset applies to validation datasets as well: validation batches are formed per batch pool with the pool's effective batch size. Subsets whose effective configurations match (resolution, bucket bounds, batch size, jitter settings and aug flags) share a pool, so their images may be mixed within one batch; subsets with differing configurations keep separate pools. Batch formation is pure index arithmetic and consumes no RNG state, so validation determinism is unaffected — the validation loop already reads the actual batch size of each batch when averaging the loss, and the per-batch RNG save/restore around the validation dataloader keeps item-level draws (e.g. flip augmentation) deterministic across validation runs.
 
 <details>
 <summary>日本語</summary>
 
 ### サブセットごとのバッチサイズと決定性
 
-サブセットに設定した `batch_size` は検証データセットにも適用されます。検証バッチはサブセットごとにそのサブセットの有効なバッチサイズで作成され、異なるサブセットの画像が混ざることはありません。バッチの構成はインデックス計算のみでRNG状態を消費しないため、検証の決定性には影響しません。検証ループは各バッチの実際のバッチサイズを損失の平均時に参照しており、検証データローダー周りのバッチ単位のRNG保存/復元により、項目単位のランダム処理（flip拡張など）も検証実行間で決定的に保たれます。
+サブセットに設定した `batch_size` は検証データセットにも適用されます。検証バッチはプールごとにそのプールの有効なバッチサイズで作成されます。有効な設定（解像度、bucket範囲、バッチサイズ、ジッター設定、拡張フラグ）が一致するサブセットは1つのプールを共有し、同じバッチ内で画像が混ざることがあります。設定が異なるサブセットは別々のプールになります。バッチの構成はインデックス計算のみでRNG状態を消費しないため、検証の決定性には影響しません。検証ループは各バッチの実際のバッチサイズを損失の平均時に参照しており、検証データローダー周りのバッチ単位のRNG保存/復元により、項目単位のランダム処理（flip拡張など）も検証実行間で決定的に保たれます。
 
 </details>
 

@@ -135,7 +135,7 @@ The following dataset options can be overridden in `[[datasets.subsets]]`:
 
 * `batch_size`
     * This corresponds to the command-line argument `--train_batch_size`.
-    * When set on a subset, batches for that subset are formed with this size instead of the dataset-level `batch_size`. Batches never mix images from different subsets, so a per-subset batch size changes the number of steps per epoch and the relative contribution of each subset to training.
+    * When set on a subset, batches for that subset are formed with this size instead of the dataset-level `batch_size`. Batches only mix images from subsets whose effective configurations match (see below), so a per-subset batch size changes the number of steps per epoch and the relative contribution of each subset to training.
 * `max_bucket_reso`, `min_bucket_reso`
     * Specify the maximum and minimum resolutions of the bucket. It must be divisible by `bucket_reso_steps`.
 * `skip_image_resolution`
@@ -162,7 +162,7 @@ max_bucket_reso = 1024
   max_bucket_reso = 1536
 ```
 
-When `enable_bucket = true`, each subset is assigned buckets using its effective resolution and bucket bounds. Batches are formed per subset with the subset's effective `batch_size` (inherited from the dataset unless overridden), so a batch never mixes images from different subsets:
+When `enable_bucket = true`, each subset is assigned buckets using its effective resolution and bucket bounds. Batches are formed per batch pool with the pool's effective `batch_size`. Subsets whose effective configurations match — resolution, `min_bucket_reso`/`max_bucket_reso`, `batch_size`, resolution jitter settings, and `flip_aug`/`alpha_mask`/`random_crop`/`random_crop_padding_percent` — share a single pool, so their images may be mixed within the same batch; subsets with differing configurations get separate pools:
 
 ```toml
 [[datasets]]
@@ -177,7 +177,7 @@ batch_size = 4
   batch_size = 1
 ```
 
-In this example, images from `C:\hoge` are trained in batches of 4 while images from `C:\fuga` are trained one at a time.
+In this example, the two subsets have different effective batch sizes, so their images are never mixed: images from `C:\hoge` are trained in batches of 4 while images from `C:\fuga` are trained one at a time. If both subsets had the same effective configuration, they would share one pool and their images could appear in the same batch.
 
 #### Options for Subsets
 
