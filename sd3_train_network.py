@@ -366,6 +366,9 @@ class Sd3NetworkTrainer(train_network.NetworkTrainer):
         if is_train and self.hf_scale > 0.0:
             self._hf_noisy_latents = noisy_model_input.detach()
 
+        if is_train and self.adv_scale > 0.0:
+            self._adv_noisy_latents = noisy_model_input.detach()
+
         # ensure the hidden state will require grad
         if args.gradient_checkpointing:
             noisy_model_input.requires_grad_(True)

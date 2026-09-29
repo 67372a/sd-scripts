@@ -766,6 +766,8 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         self._hf_noisy_latents = None
         # Same for the multiscale x0-prediction anchor loss (no analytic clean x0).
         self._anchor_noisy_latents = None
+        # iLECO has no analytic clean x0, so it cannot form the adv prediction either.
+        self._adv_noisy_latents = None
         anima: anima_models.Anima = unet
 
         if self.ileco_text_encoder_conds is None:
@@ -869,6 +871,7 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         self._hf_noisy_latents = None
         # Same for the multiscale x0-prediction anchor loss (no analytic clean x0).
         self._anchor_noisy_latents = None
+        self._adv_noisy_latents = None
         anima: anima_models.Anima = unet
 
         if network is None or not hasattr(network, "set_multiplier"):
@@ -1138,6 +1141,9 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         # Store noisy latents for the multiscale x0-prediction anchor loss (4D, before 5D unsqueeze)
         if is_train and self.anchor_scale > 0.0:
             self._anchor_noisy_latents = noisy_model_input.detach()
+
+        if is_train and self.adv_scale > 0.0:
+            self._adv_noisy_latents = noisy_model_input.detach()
 
         # Set T-LoRA timestep mask before timestep scaling (mask expects [0, max_timestep] range)
         self.apply_tlora_mask(timesteps)

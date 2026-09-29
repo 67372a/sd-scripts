@@ -572,6 +572,9 @@ class HunyuanImageNetworkTrainer(train_network.NetworkTrainer):
         if is_train and self.hf_scale > 0.0:
             self._hf_noisy_latents = noisy_model_input.detach()
 
+        if is_train and self.adv_scale > 0.0:
+            self._adv_noisy_latents = noisy_model_input.detach()
+
         # bfloat16 is too low precision for 0-1000 TODO fix get_noisy_model_input_and_timesteps
         timesteps = (sigmas[:, 0, 0, 0] * 1000).to(torch.int64)
         # print(

@@ -31,6 +31,7 @@ from diffusers import DDPMScheduler
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from library import deepspeed_utils, model_util, sai_model_spec, strategy_base, strategy_sd, sai_model_spec
 from library import anchor_loss
+from library import adv_cache, dist_match
 from library import hf_token_loss
 from library.strategy_sdxl import SdxlTextEncodingStrategy
 
@@ -162,6 +163,23 @@ class NetworkTrainer:
         self.anchor_loss_value = None      # detached scaled anchor contribution for logging (tensor)
         self._anchor_warned_missing = False  # one-time warning when the term cannot run
 
+        # Stationary multi-scale RFF-MMD distribution matching ("adv") loss.
+        self.adv_scale = 0.0
+        self.adv_levels = 4
+        self.adv_domain = "latent"
+        self.adv_features = 256
+        self.adv_bandwidths = ""
+        self.adv_tokens_per_band = 1024
+        self.adv_reference_samples = 4096
+        self.adv_rff_seed = 0x5A17C0DE
+        self.adv_snr_weighting = False
+        self.adv_prediction_mode = None
+        self.adv_timesteps_in_sigma = False
+        self.adv_references = None
+        self.adv_loss_value = None
+        self._adv_noisy_latents = None
+        self._adv_warned_missing = False
+
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
         self,
@@ -190,6 +208,7 @@ class NetworkTrainer:
         current_weight_noise_norm=None,
         current_hf_loss=None,
         current_anchor_loss=None,
+        current_adv_loss=None,
         it_s: float = 0.0,
     ):
         logs = {"loss/current": current_loss, "loss/average": avr_loss}
@@ -222,6 +241,9 @@ class NetworkTrainer:
 
         if current_anchor_loss is not None:
             logs["loss/current_anchor"] = current_anchor_loss
+
+        if current_adv_loss is not None:
+            logs["loss/current_adv"] = current_adv_loss
 
         if keys_scaled is not None:
             logs["max_norm/keys_scaled"] = keys_scaled
@@ -491,6 +513,9 @@ class NetworkTrainer:
         if is_train and self.anchor_scale > 0.0:
             self._anchor_noisy_latents = noisy_latents.detach() if isinstance(noisy_latents, torch.Tensor) else None
 
+        if is_train and self.adv_scale > 0.0:
+            self._adv_noisy_latents = noisy_latents.detach() if isinstance(noisy_latents, torch.Tensor) else None
+
         # ensure the hidden state will require grad
         if is_train and args.gradient_checkpointing:
             for x in noisy_latents:
@@ -652,6 +677,326 @@ class NetworkTrainer:
                 f"levels={self.anchor_levels}, snr_weighting={self.anchor_snr_weighting}, "
                 f"mode={self.anchor_prediction_mode}"
             )
+
+    def setup_adv_objective(self, args):
+        """Resolve and validate the stationary multi-scale RFF-MMD objective."""
+        self.adv_scale = float(getattr(args, "adv_scale", 0.0) or 0.0)
+        levels = getattr(args, "adv_levels", 4)
+        self.adv_levels = 4 if levels is None else int(levels)
+        self.adv_domain = str(getattr(args, "adv_domain", "latent") or "latent")
+        self.adv_features = int(getattr(args, "adv_features", 256))
+        self.adv_bandwidths = str(getattr(args, "adv_bandwidths", "") or "")
+        self.adv_tokens_per_band = int(getattr(args, "adv_tokens_per_band", 1024))
+        self.adv_reference_samples = int(getattr(args, "adv_reference_samples", 4096))
+        self.adv_rff_seed = int(getattr(args, "adv_rff_seed", 0x5A17C0DE))
+        self.adv_snr_weighting = bool(getattr(args, "adv_snr_weighting", False))
+        dist_match.validate_adv_args(
+            self.adv_scale,
+            self.adv_levels,
+            self.adv_features,
+            self.adv_tokens_per_band,
+            self.adv_reference_samples,
+            self.adv_bandwidths,
+        )
+        if self.adv_domain not in ("latent", "tae_pixels"):
+            raise ValueError("adv_domain must be 'latent' or 'tae_pixels'")
+        if self.adv_scale > 0.0 and self.adv_domain != "latent":
+            raise ValueError(
+                "adv_domain='tae_pixels' is not supported by this train_network trainer; "
+                "use adv_domain='latent'"
+            )
+        if self.adv_scale > 0.0 and (
+            getattr(self, "model_type", None) == "chroma_radiance"
+            or getattr(args, "model_type", None) == "chroma_radiance"
+        ):
+            raise ValueError(
+                "stationary adv matching for ChromaRadiance requires the pixel/TAE reference path, "
+                "which is not available in this train_network implementation"
+            )
+
+        if self.adv_prediction_mode is None:
+            self.adv_prediction_mode = (
+                self.hf_prediction_mode or self.anchor_prediction_mode
+            )
+        if self.adv_prediction_mode is None:
+            if getattr(args, "flow_model", False):
+                self.adv_prediction_mode = "flow"
+            elif args.v_parameterization:
+                self.adv_prediction_mode = "vpred_ddpm"
+            else:
+                self.adv_prediction_mode = "eps_ddpm"
+        self.adv_timesteps_in_sigma = bool(
+            self.hf_timesteps_in_sigma or self.anchor_timesteps_in_sigma
+        )
+        if self.adv_scale > 0.0:
+            logger.info(
+                f"Stationary multi-scale RFF-MMD loss enabled: scale={self.adv_scale}, "
+                f"levels={self.adv_levels}, features={self.adv_features}, "
+                f"tokens_per_band={self.adv_tokens_per_band}, domain={self.adv_domain}, "
+                f"mode={self.adv_prediction_mode}, snr_weighting={self.adv_snr_weighting}"
+            )
+
+    def _adv_dataset_signature(self, train_dataset_group, args) -> str:
+        """Fingerprint canonical training sources and every cache-affecting option."""
+        records = []
+        datasets = getattr(train_dataset_group, "datasets", [train_dataset_group])
+        for dataset in datasets:
+            source_dataset = getattr(dataset, "dreambooth_dataset_delegate", dataset)
+            image_data = getattr(source_dataset, "image_data", {})
+            image_to_subset = getattr(source_dataset, "image_to_subset", {})
+            for image_key, info in image_data.items():
+                subset = image_to_subset.get(image_key)
+                if bool(getattr(info, "is_val", False)) or bool(getattr(info, "is_reg", False)):
+                    continue
+                if subset is not None and (bool(getattr(subset, "is_val", False)) or bool(getattr(subset, "is_reg", False))):
+                    continue
+                source_path = getattr(info, "latents_npz", None) or getattr(info, "absolute_path", None)
+                stat = None
+                if source_path and os.path.isfile(source_path):
+                    file_stat = os.stat(source_path)
+                    stat = (file_stat.st_size, file_stat.st_mtime_ns)
+                records.append(
+                    (
+                        str(image_key),
+                        str(source_path),
+                        stat,
+                        tuple(getattr(info, "bucket_reso", ()) or ()),
+                        tuple(
+                            sorted(
+                                (int(k), tuple(v[0]))
+                                for k, v in (getattr(info, "jitter_bucket_info", {}) or {}).items()
+                            )
+                        ),
+                        (
+                            bool(getattr(subset, "flip_aug", False)),
+                            bool(getattr(subset, "color_aug", False)),
+                            bool(getattr(subset, "gamma_aug", False)),
+                            bool(getattr(subset, "random_crop", False)),
+                            int(getattr(subset, "num_repeats", 1) or 1),
+                        ),
+                    )
+                )
+        records.sort(key=lambda row: (row[0], row[1]))
+        payload = {
+            "cache_version": adv_cache.CACHE_VERSION,
+            "sources": records,
+            "pretrained_model": getattr(args, "pretrained_model_name_or_path", None),
+            "vae": getattr(args, "vae", None),
+            "vae_custom_scale": getattr(args, "vae_custom_scale", None),
+            "vae_custom_shift": getattr(args, "vae_custom_shift", None),
+            "seed": getattr(args, "seed", None),
+            "cache_latents_dtype": getattr(args, "cache_latents_dtype", "auto"),
+            "cache_aug_variants": getattr(args, "cache_aug_variants", 0),
+            "cache_aug_refresh_epochs": getattr(args, "cache_aug_refresh_epochs", 0),
+            "latent_scale_factor": self.vae_scale_factor,
+            "latent_shift_factor": self.latent_shift,
+            "levels": self.adv_levels,
+            "domain": self.adv_domain,
+            "features": self.adv_features,
+            "bandwidths": self.adv_bandwidths,
+            "tokens_per_band": self.adv_tokens_per_band,
+            "reference_samples": self.adv_reference_samples,
+            "rff_seed": self.adv_rff_seed,
+        }
+        return adv_cache.fingerprint_payload(payload)
+
+    @staticmethod
+    def _adv_cache_sources(train_dataset_group):
+        """Yield lazy loaders for canonical training latents (plus cached variants)."""
+        sources = []
+
+        def add_source(loader, grid_key=None, source_weight=1):
+            if grid_key is not None:
+                loader.adv_grid_key = grid_key
+            loader.adv_weight = max(1, int(source_weight))
+            sources.append(loader)
+
+        def latent_grid_key(latent):
+            shape = tuple(latent.shape)
+            if len(shape) == 5:
+                return f"{shape[-2]}x{shape[-1]}"
+            if len(shape) == 4:
+                return f"{shape[-2]}x{shape[-1]}"
+            if len(shape) == 3:
+                return f"{shape[-2]}x{shape[-1]}"
+            return None
+
+        def add_tensor(latent, source_weight=1):
+            add_source(lambda latent=latent: latent, latent_grid_key(latent), source_weight)
+
+        datasets = getattr(train_dataset_group, "datasets", [train_dataset_group])
+        seen_info = set()
+        for dataset in datasets:
+            source_dataset = getattr(dataset, "dreambooth_dataset_delegate", dataset)
+            image_data = getattr(source_dataset, "image_data", {})
+            image_to_subset = getattr(source_dataset, "image_to_subset", {})
+            latent_strategy = getattr(source_dataset, "latents_caching_strategy", None)
+            if latent_strategy is None:
+                try:
+                    from library.strategy_base import LatentsCachingStrategy
+
+                    latent_strategy = LatentsCachingStrategy.get_strategy()
+                except (AttributeError, RuntimeError):
+                    latent_strategy = None
+
+            for image_key, info in image_data.items():
+                if id(info) in seen_info:
+                    continue
+                seen_info.add(id(info))
+                subset = image_to_subset.get(image_key)
+                if bool(getattr(info, "is_val", False)) or bool(getattr(info, "is_reg", False)):
+                    continue
+                if subset is not None and (bool(getattr(subset, "is_val", False)) or bool(getattr(subset, "is_reg", False))):
+                    continue
+                source_weight = max(1, int(getattr(subset, "num_repeats", 1) or 1))
+
+                # Resolution-jitter latent caches are separate clean grids.
+                jitter_latents = getattr(info, "latents_by_reso", {}) or {}
+                if jitter_latents:
+                    for cached in jitter_latents.values():
+                        latent = cached[0]
+                        if latent is not None:
+                            add_tensor(latent, source_weight)
+                        flipped = cached[1]
+                        if bool(getattr(subset, "flip_aug", False)) and flipped is not None:
+                            add_tensor(flipped, source_weight)
+                    continue
+
+                latent = getattr(info, "latents", None)
+                variants = getattr(info, "latents_aug_variants", None) or []
+                if latent is not None:
+                    add_tensor(latent, source_weight)
+                    if bool(getattr(subset, "flip_aug", False)) and getattr(info, "latents_flipped", None) is not None:
+                        flipped = info.latents_flipped
+                        add_tensor(flipped, source_weight)
+                    for variant in variants:
+                        variant_latent = variant.get("latents") if isinstance(variant, dict) else None
+                        if variant_latent is not None:
+                            add_tensor(variant_latent, source_weight)
+                    continue
+
+                latent_path = getattr(info, "latents_npz", None)
+                if latent_path is None or latent_strategy is None:
+                    continue
+                resolutions = [tuple(info.bucket_reso)] if getattr(info, "bucket_reso", None) is not None else []
+                jitter_info = getattr(info, "jitter_bucket_info", {}) or {}
+                if jitter_info:
+                    resolutions = list(dict.fromkeys(tuple(value[0]) for value in jitter_info.values()))
+                if not resolutions:
+                    continue
+                try:
+                    variant_count = source_dataset.get_effective_aug_variant_count(subset) if subset is not None else 1
+                except (AttributeError, TypeError):
+                    variant_count = 1
+                for resolution in resolutions:
+                    grid_key = f"{int(resolution[1]) // 8}x{int(resolution[0]) // 8}"
+                    for variant_index in range(max(1, int(variant_count))):
+                        def load_variant(path=latent_path, reso=resolution, vi=variant_index, strategy=latent_strategy):
+                            return strategy.load_latents_from_disk(path, reso, variant=vi)[0]
+
+                        add_source(load_variant, grid_key, source_weight)
+                    if bool(getattr(subset, "flip_aug", False)):
+                        def load_flipped(path=latent_path, reso=resolution, strategy=latent_strategy):
+                            flipped_latents = strategy.load_latents_from_disk(path, reso, variant=0)[3]
+                            if flipped_latents is None:
+                                raise ValueError(f"flip augmentation requested but no flipped latent is cached in {path}")
+                            return flipped_latents
+
+                        add_source(load_flipped, grid_key, source_weight)
+        return sources
+
+    def prepare_adv_reference(self, args, train_dataset_group, accelerator):
+        """Load or build the fixed dataset embedding before training begins."""
+        if self.adv_scale <= 0.0:
+            return
+        signature = self._adv_dataset_signature(train_dataset_group, args)
+        output_dir = getattr(args, "output_dir", None) or "."
+        cache_dir = getattr(args, "adv_cache_dir", None) or os.path.join(output_dir, "adv_cache")
+        cache_path = os.path.join(cache_dir, f"reference-{signature[:20]}.pt")
+        if accelerator.is_main_process:
+            try:
+                adv_cache.load_adv_cache(cache_path, signature, accelerator.device)
+                logger.info(f"Loaded stationary adv reference cache: {cache_path}")
+            except (OSError, ValueError, RuntimeError, EOFError) as exc:
+                if os.path.exists(cache_path):
+                    logger.warning(f"Rebuilding invalid stationary adv reference cache ({exc})")
+                sources = self._adv_cache_sources(train_dataset_group)
+                transformed_sources = []
+                for source in sources:
+                    transformed = lambda source=source: self.shift_scale_latents(args, source())
+                    if hasattr(source, "adv_grid_key"):
+                        transformed.adv_grid_key = source.adv_grid_key
+                    transformed.adv_weight = getattr(source, "adv_weight", 1)
+                    transformed_sources.append(transformed)
+                sources = transformed_sources
+                references = adv_cache.build_adv_references(
+                    sources,
+                    levels=self.adv_levels,
+                    token_budget=self.adv_tokens_per_band,
+                    reference_samples=self.adv_reference_samples,
+                    features=self.adv_features,
+                    bandwidths=self.adv_bandwidths,
+                    seed=self.adv_rff_seed,
+                    device=accelerator.device,
+                )
+                adv_cache.save_adv_cache(cache_path, signature, references)
+                logger.info(f"Built stationary adv reference cache for {len(references)} latent grids: {cache_path}")
+        accelerator.wait_for_everyone()
+        self.adv_references = adv_cache.load_adv_cache(cache_path, signature, accelerator.device)
+
+    def _apply_adv_term(self, final_loss, model_pred, clean, timesteps, weighting, noise_scheduler, args, batch):
+        """Add the weighted fixed-reference MMD contribution to a scalar training loss."""
+        self.adv_loss_value = None
+        adv_needs_noisy = self.adv_prediction_mode != "x0_direct"
+        noisy = self._adv_noisy_latents
+        if adv_needs_noisy and noisy is None:
+            if not self._adv_warned_missing:
+                self._adv_warned_missing = True
+                logger.warning(
+                    "adv_scale > 0 but this trainer/path did not store noisy latents; "
+                    "the stationary distribution-matching loss is INERT for this configuration."
+                )
+            return final_loss
+        if self.adv_references is None:
+            if not self._adv_warned_missing:
+                self._adv_warned_missing = True
+                logger.warning("adv_scale > 0 but no stationary reference cache is loaded; skipping the adv loss.")
+            return final_loss
+
+        x0_pred = hf_token_loss.hf_x0_hat(
+            model_pred,
+            noisy,
+            timesteps,
+            self.adv_prediction_mode,
+            noise_scheduler=noise_scheduler,
+            timesteps_in_sigma=self.adv_timesteps_in_sigma,
+            eps_train=self.hf_eps_train,
+        ).to(dtype=clean.dtype)
+        adv_per_sample = dist_match.adv_per_sample_loss(
+            x0_pred,
+            self.adv_references,
+            levels=self.adv_levels,
+            tokens_per_band=self.adv_tokens_per_band,
+        )
+        if self.adv_snr_weighting:
+            adv_per_sample = adv_per_sample * dist_match.adv_snr_weights(
+                timesteps,
+                self.adv_prediction_mode,
+                noise_scheduler=noise_scheduler,
+                timesteps_in_sigma=self.adv_timesteps_in_sigma,
+            )
+        if weighting is not None:
+            adv_weight = weighting.detach().reshape(-1)
+            if adv_weight.shape[0] == adv_per_sample.shape[0]:
+                adv_per_sample = adv_per_sample * adv_weight.to(adv_per_sample.dtype)
+        loss_weights = batch.get("loss_weights")
+        if loss_weights is not None:
+            adv_per_sample = adv_per_sample * loss_weights.reshape(-1).to(adv_per_sample.dtype)
+        adv_per_sample = self.post_process_loss(adv_per_sample, args, timesteps, noise_scheduler)
+        adv_term = adv_per_sample.mean()
+        final_loss = final_loss + self.adv_scale * adv_term
+        self.adv_loss_value = (self.adv_scale * adv_term).detach()
+        return final_loss
 
     def build_adaptive_model_fn(self, unet, accelerator, weight_dtype):
         """Build a model_fn(noisy_latents, timesteps, wdtype) -> noise_pred for Algorithm 2.
@@ -1362,6 +1707,19 @@ class NetworkTrainer:
             # caller's existing periodic sync — no .item() on the hot path).
             self.anchor_loss_value = (self.anchor_scale * anchor_term).detach()
 
+        # --- Stationary multi-scale distribution matching (fixed-reference RFF-MMD) ---
+        if is_train and self.adv_scale > 0.0:
+            final_loss = self._apply_adv_term(
+                final_loss,
+                noise_pred,
+                latents,
+                timesteps,
+                weighting,
+                noise_scheduler,
+                args,
+                batch,
+            )
+
         return final_loss, pre_scaling_loss, loss_scaled
     
     def process_val_batch(
@@ -1633,6 +1991,7 @@ class NetworkTrainer:
         train_util.prepare_dataset_args(args, True)
         self.setup_hf_objective(args)  # High-Frequency Token latent loss (validates hf_scale/hf_exponent/hf_patch)
         self.setup_anchor_objective(args)  # Multiscale MSE x0-prediction anchor loss (validates anchor args)
+        self.setup_adv_objective(args)  # Stationary multi-scale RFF-MMD distribution matching
         train_util.set_torch_cuda_reduced_precision(args)
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
@@ -1705,6 +2064,12 @@ class NetworkTrainer:
         args.vae_scale_factor = self.vae_scale_factor
         args.vae_shift_factor = self.latent_shift
 
+        if self.adv_scale > 0.0:
+            if int(getattr(args, "cache_aug_refresh_epochs", 0) or 0) > 0:
+                raise ValueError("adv_scale > 0 is incompatible with epoch-refreshed latent augmentation caches")
+            if not args.cache_latents:
+                logger.info("adv_scale > 0 requires stable clean reference samples; enabling latent caching")
+                args.cache_latents = True
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
         use_user_config = args.dataset_config is not None
@@ -1890,6 +2255,10 @@ class NetworkTrainer:
                 if val_dataset_group is not None:
                     val_dataset_group.refresh_latent_variants(vae_encode_fn, accelerator.device, vae_dtype)
                 logger.info("Initial latent augmentation variants generated in-memory.")
+
+            if self.adv_scale > 0.0:
+                train_dataset_group.set_current_strategies()
+                self.prepare_adv_reference(args, train_dataset_group, accelerator)
 
             vae.to("cpu")
             clean_memory_on_device(accelerator.device)
@@ -2661,6 +3030,15 @@ class NetworkTrainer:
             "ss_anchor_scale": self.anchor_scale if self.anchor_scale > 0.0 else 0.0,
             "ss_anchor_levels": self.anchor_levels if self.anchor_scale > 0.0 else None,
             "ss_anchor_snr_weighting": bool(self.anchor_snr_weighting) if self.anchor_scale > 0.0 else None,
+            "ss_adv_scale": self.adv_scale if self.adv_scale > 0.0 else 0.0,
+            "ss_adv_levels": self.adv_levels if self.adv_scale > 0.0 else None,
+            "ss_adv_domain": self.adv_domain if self.adv_scale > 0.0 else None,
+            "ss_adv_features": self.adv_features if self.adv_scale > 0.0 else None,
+            "ss_adv_bandwidths": self.adv_bandwidths if self.adv_scale > 0.0 else None,
+            "ss_adv_tokens_per_band": self.adv_tokens_per_band if self.adv_scale > 0.0 else None,
+            "ss_adv_reference_samples": self.adv_reference_samples if self.adv_scale > 0.0 else None,
+            "ss_adv_rff_seed": self.adv_rff_seed if self.adv_scale > 0.0 else None,
+            "ss_adv_snr_weighting": bool(self.adv_snr_weighting) if self.adv_scale > 0.0 else None,
         }
 
         self.update_metadata(metadata, args)  # architecture specific metadata
@@ -3124,6 +3502,7 @@ class NetworkTrainer:
         current_global_step_wnoise = 0.0 if self.weight_noise_enabled else None
         current_global_step_hf = 0.0 if self.hf_scale > 0.0 else None
         current_global_step_anchor = 0.0 if self.anchor_scale > 0.0 else None
+        current_global_step_adv = 0.0 if self.adv_scale > 0.0 else None
         avr_loss = 0.0
         accumulation_counter = 0
         accumulated_samples = 0  # Tracks actual samples across micro-batches for dynamic sigma
@@ -3190,6 +3569,7 @@ class NetworkTrainer:
                 current_patch_topology_loss=None,
                 current_hf_loss=None,
                 current_anchor_loss=None,
+                current_adv_loss=None,
                 it_s=rate_tracker.it_per_sec,
             )
             if val_logs:
@@ -3337,6 +3717,9 @@ class NetworkTrainer:
                     # existing periodic sync — the hot path keeps a detached tensor)
                     if self.anchor_scale > 0.0 and self.anchor_loss_value is not None:
                         current_global_step_anchor = (current_global_step_anchor or 0.0) + self.anchor_loss_value.item()
+
+                    if self.adv_scale > 0.0 and self.adv_loss_value is not None:
+                        current_global_step_adv = (current_global_step_adv or 0.0) + self.adv_loss_value.item()
 
                     if loss.ndim != 0:
                         loss = loss.mean()
@@ -3606,6 +3989,7 @@ class NetworkTrainer:
                             current_weight_noise_norm=(current_global_step_wnoise / accumulation_counter) if self.weight_noise_enabled and current_global_step_wnoise is not None else None,
                             current_hf_loss=(current_global_step_hf / accumulation_counter) if self.hf_scale > 0.0 and current_global_step_hf is not None else None,
                             current_anchor_loss=(current_global_step_anchor / accumulation_counter) if self.anchor_scale > 0.0 and current_global_step_anchor is not None else None,
+                            current_adv_loss=(current_global_step_adv / accumulation_counter) if self.adv_scale > 0.0 and current_global_step_adv is not None else None,
                             it_s=rate_tracker.it_per_sec,
                         )
                         if val_logs:
@@ -3627,6 +4011,8 @@ class NetworkTrainer:
                         current_global_step_hf = 0.0
                     if self.anchor_scale > 0.0:
                         current_global_step_anchor = 0.0
+                    if self.adv_scale > 0.0:
+                        current_global_step_adv = 0.0
                     accumulation_counter = 0
                     accumulated_samples = 0
 
@@ -4259,6 +4645,68 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Apply the soft SNR(t) gate to the anchor loss (batch-mean-1 normalized): "
         "early (noisy, low-SNR) steps weigh less, late (clean, high-SNR) steps weigh more. "
         "Inert while --anchor_scale is 0.",
+    )
+
+    # Stationary multi-scale RFF-MMD distribution-matching loss.
+    parser.add_argument(
+        "--adv_scale",
+        type=float,
+        default=0.0,
+        help="Stationary multi-scale RFF-MMD loss weight (0 = off). Adds a distribution-matching "
+        "term between each predicted-clean sample and a precomputed fixed training-set reference.",
+    )
+    parser.add_argument(
+        "--adv_levels",
+        type=int,
+        default=4,
+        help="Laplacian-pyramid octave levels for the stationary adv loss (plus coarsest residual).",
+    )
+    parser.add_argument(
+        "--adv_domain",
+        choices=("latent", "tae_pixels"),
+        default="latent",
+        help="Reference/prediction domain for adv matching. This train_network implementation currently supports latent domain.",
+    )
+    parser.add_argument(
+        "--adv_features",
+        type=int,
+        default=256,
+        help="RFF feature count per bandwidth for the stationary adv loss.",
+    )
+    parser.add_argument(
+        "--adv_bandwidths",
+        type=str,
+        default="",
+        help="Comma-separated positive RBF bandwidth ladder; empty uses the reference-token median heuristic (0.5x, 1x, 2x).",
+    )
+    parser.add_argument(
+        "--adv_tokens_per_band",
+        type=int,
+        default=1024,
+        help="Maximum adaptive-average-pooled spatial tokens per Laplacian band.",
+    )
+    parser.add_argument(
+        "--adv_reference_samples",
+        type=int,
+        default=4096,
+        help="Bounded per-band reference-token sample count for the bandwidth heuristic.",
+    )
+    parser.add_argument(
+        "--adv_rff_seed",
+        type=lambda value: int(value, 0),
+        default=0x5A17C0DE,
+        help="Dedicated seed for deterministic RFF frequencies/phases (accepts decimal or 0x-prefixed integer).",
+    )
+    parser.add_argument(
+        "--adv_snr_weighting",
+        action="store_true",
+        help="Apply a detached, batch-mean-one SNR gate to the adv term; off by default.",
+    )
+    parser.add_argument(
+        "--adv_cache_dir",
+        type=str,
+        default=None,
+        help="Directory for the stationary adv reference cache (default: <output_dir>/adv_cache).",
     )
 
     parser.add_argument(

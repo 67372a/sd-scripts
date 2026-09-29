@@ -400,6 +400,9 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         if is_train and self.hf_scale > 0.0:
             self._hf_noisy_latents = noisy_model_input.detach()
 
+        if is_train and self.adv_scale > 0.0:
+            self._adv_noisy_latents = noisy_model_input.detach()
+
         # --- ChromaRadiance: pixel-space forward (no pack/unpack) ---
         if self.model_type == "chroma_radiance":
             l_pooled, t5_out, txt_ids, t5_attn_mask = text_encoder_conds
